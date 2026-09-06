@@ -89,7 +89,7 @@ Component map:
 | `logreg_baseline.py` | mandated baseline |
 | `infer.py` | streaming live inference (CSV or pre-windowed CSV) |
 | `packet_features.py` | PCAP → pre-windowed CSV via Scapy (packet-level path); shared `ingest_packet`/`finalize_window` accumulator also used by the live sniffer |
-| `live_sniffer.py` | 🌐 Live Traffic Stream — Scapy interface capture (sniff) + replay mode, background threads, thread-safe `LiveState` snapshots, live incident correlation |
+| `live_sniffer.py` | Live Traffic Stream — Scapy interface capture (sniff) + replay mode, background threads, thread-safe `LiveState` snapshots, live incident correlation |
 | `app.py` | offline Streamlit demo (accepts CSV, PCAP, and live traffic stream) |
 | `zero_day_callout.py` | novelty / "unlike anything trained" advisory |
 | `eval_forecasting.py`, `walk_forward_cv.py`, `world_model_dynamics.py` | evaluation |
@@ -376,7 +376,7 @@ for activity unlike anything in training".
 - **Known gap**: not yet validated on a *real* CICIDS2017 PCAP (raw capture
   unavailable locally); synthetic-only as of writing.
 
-### 11b. 🌐 Live Traffic Stream (real-time interface capture)
+### 11b. Live Traffic Stream (real-time interface capture)
 
 - **`live_sniffer.py`** closes the loop between the offline packet path and
   *now*: it captures packets straight off a live network interface with Scapy
