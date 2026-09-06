@@ -1,0 +1,1945 @@
+"""
+dashboard.py
+------------
+NetSight SOC command center — the six workflow centers on the real pipeline.
+
+  Command   — telemetry strip, network-activity map, threat/incident queues,
+              event workflow timeline (live overview above the centers)
+  DETECTION      — interactive risk timeline, alert feed, MITRE/CAPEC/CVE
+  INVESTIGATION  — per-window feature attribution + counterfactual what-if
+  RESPONSE       — MITRE intel + multi-OS firewall rules + honeypot sim
+  INTELLIGENCE   — threat distribution, operating points, MITRE/CAPEC knowledge
+  FORENSICS      — tamper-proof SHA-256 Merkle ledger + SOC PDF report
+  REPORTS        — every machine-readable / human-readable export in one hub
+"""
+
+import html
+import json
+import math
+import os
+import tempfile
+import time
+from collections import Counter
+
+import altair as alt
+import pandas as pd
+import streamlit as st
+
+from infer import (
+    WINDOW_SIZE,
+    RandomForestEngine,
+    LSTMEngine,
+    run_inference,
+    correlate_incidents,
+)
+from active_defense import ActiveDefenseEngine
+from forensics_report import ForensicLedger, generate_pdf_report
+from knowledge_base import family_meta, capec_chain
+from live_sniffer import LiveSession, DEFAULT_LIVE_SOURCE
+
+FAM_COLORS = {
+    "botnet": "#f43f5e", "dos": "#f97316", "web_attack": "#eab308",
+    "brute_force": "#34d399", "port_scan": "#60a5fa", "infiltration": "#a78bfa",
+    "none": "#64748b",
+}
+
+
+@st.cache_resource(show_spinner=False)
+def get_engine(model_name, threshold):
+    if model_name == "RandomForest":
+        return RandomForestEngine(threshold=threshold)
+    return LSTMEngine(threshold=threshold)
+
+
+@st.cache_resource(show_spinner=False)
+def load_ledger():
+    return ForensicLedger()
+
+
+DEMO_CSVS = {
+    "Friday DDoS (recommended)": "dataset/demo_friday_ddos_windows.csv",
+    "Thursday web attacks": "dataset/Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv",
+    "Tuesday brute-force": "dataset/Tuesday-WorkingHours.pcap_ISCX.csv",
+}
+
+
+def risk_badge(risk):
+    if risk >= 0.75:
+        return "crit", "CRITICAL"
+    if risk >= 0.5:
+        return "high", "HIGH"
+    return "med", "ELEVATED"
+
+
+def sev_badge(sev):
+    s = str(sev or "").upper()
+    if s == "CRITICAL":
+        return "crit", "CRITICAL"
+    if s == "HIGH":
+        return "high", "HIGH"
+    if s == "MEDIUM":
+        return "med", "MEDIUM"
+    if s in ("NONE", "LOW"):
+        return "none", s
+    return "low", s or "—"
+
+
+def fam_color(f):
+    return FAM_COLORS.get(str(f), "#94a3b8")
+
+
+def _cls_col(cls):
+    # maps a risk/severity class token ("crit","high","med","low","safe","info")
+    # to its design-system hex so it can be used as an inline SVG/CSS color.
+    return {
+        "crit": "#ef4444", "high": "#f59e0b", "med": "#fde047",
+        "low": "#34d399", "safe": "#34d399", "info": "#22d3ee",
+        "none": "#94a3b8",
+    }.get(str(cls), "#3b82f6")
+
+
+def netgraph_html(tl, flagged):
+    """Inline SVG network-activity map built from the real flagged windows."""
+    fams = flagged["attack_family"].value_counts().head(6) if len(flagged) else None
+    cx, cy, R = 360, 104, 132
+    parts = []
+    if fams is None or not len(fams):
+        parts.append(
+            f'<circle class="netcore" cx="{cx}" cy="{cy}" r="34" '
+            f'fill="rgba(52,211,153,.12)" stroke="#34d399" stroke-width="1.5"/>')
+        parts.append(
+            f'<text x="{cx}" y="{cy+4}" text-anchor="middle" fill="#6ee7b7" '
+            f'font-size="12" font-weight="700">CLEAR</text>')
+    else:
+        nodes = []
+        n = len(fams)
+        for i, (f, c) in enumerate(fams.items()):
+            ang = -math.pi / 2 + i * 2 * math.pi / n
+            x = cx + R * math.cos(ang)
+            y = cy + R * math.sin(ang)
+            r = 12 + 5 * math.sqrt(c)
+            nodes.append((f, x, y, r, int(c), fam_color(f)))
+        for f, x, y, r, c, col in nodes:
+            w = max(1.0, min(5.0, 1.0 + c / 60.0))
+            op = min(0.9, 0.22 + c / 240.0)
+            parts.append(
+                f'<line class="netedge" x1="{x:.0f}" y1="{y:.0f}" '
+                f'x2="{cx}" y2="{cy}" stroke="{col}" stroke-width="{w:.1f}" '
+                f'opacity="{op:.2f}"/>')
+        parts.append(
+            f'<circle class="netcore" cx="{cx}" cy="{cy}" r="26" '
+            f'fill="rgba(34,211,238,.10)" stroke="#22d3ee" stroke-width="1.6"/>')
+        parts.append(
+            f'<text x="{cx}" y="{cy+4}" text-anchor="middle" fill="#67e8f9" '
+            f'font-size="11" font-weight="700">CORE</text>')
+        for f, x, y, r, c, col in nodes:
+            parts.append(
+                f'<circle class="netnode" cx="{x:.0f}" cy="{y:.0f}" r="{r:.1f}" '
+                f'fill="{col}" fill-opacity=".12" stroke="{col}" stroke-width="1.4"/>')
+            parts.append(
+                f'<text x="{x:.0f}" y="{y+r+13:.0f}" text-anchor="middle" '
+                f'fill="#c3d1e0" font-size="10" font-family="monospace">'
+                f'{html.escape(str(f))} · {c}</text>')
+    return ('<svg viewBox="0 0 720 208" width="100%" role="img" '
+            'aria-label="network activity map" style="display:block">'
+            + "".join(parts) + "</svg>")
+
+
+def event_flow_html(steps):
+    """Event-workflow timeline driven by real booleans:
+    done = reached, cur = next not reached, pend = beyond."""
+    done = [i for i, t in enumerate(steps) if t]
+    cur = (len(steps) if len(done) == len(steps)
+           else next(i for i in range(len(steps)) if i not in done))
+    out = []
+    for i, label in enumerate(steps):
+        cls = "ef-done" if i in done else ("ef-cur" if i == cur else "ef-pend")
+        out.append(f"<span class='ef'><span class='efstep {cls}'>{label}</span>"
+                   f"<span class='efarrow'>›</span></span>")
+    return "<div class='evflow'>" + "".join(out) + "</div>"
+
+
+def timeline_chart(tl, flagged, threshold):
+    base = alt.Chart(tl).encode(
+        x=alt.X("window_id:Q", title="Window"),
+        y=alt.Y("risk_score:Q", title="Risk score", scale=alt.Scale(domain=[0, 1])),
+        tooltip=[alt.Tooltip("window_id:O", title="window"),
+                 alt.Tooltip("risk_score:Q", title="risk", format=".3f"),
+                 alt.Tooltip("attack_family:N", title="family"),
+                 alt.Tooltip("mitre_stage:N", title="MITRE")],
+    )
+    area = base.mark_area(opacity=0.12, color="#3b82f6", line=False)
+    line = base.mark_line(color="#3b82f6", strokeWidth=2)
+    layers = [area, line]
+    if len(flagged):
+        d = alt.Chart(flagged).mark_circle(color="#ef4444", size=78).encode(
+            x=alt.X("window_id:Q"),
+            y=alt.Y("risk_score:Q"),
+            tooltip=[alt.Tooltip("window_id:O", title="alert window"),
+                     alt.Tooltip("risk_score:Q", title="risk", format=".3f"),
+                     alt.Tooltip("attack_family:N", title="family")],
+        )
+        layers.append(d)
+    th = alt.Chart(pd.DataFrame({"y": [threshold]})).mark_rule(
+        color="#fbbf24", strokeDash=[5, 4]).encode(y="y:Q")
+    layers.append(th)
+    return alt.layer(*layers).properties(height=330).interactive()
+
+
+ledger = load_ledger()
+defense = ActiveDefenseEngine()
+
+def _load_json(name, default=None):
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name)) as fh:
+            return json.load(fh)
+    except Exception:
+        return default
+
+full = _load_json("full_model_summary.json", {})
+evalf = _load_json("eval_forecasting.json", {})
+world = _load_json("world_model_dynamics.json", {})
+wf = _load_json("walk_forward_cv.json", {})
+lt = evalf.get("lead_time_windows") or {}
+
+# ============================ SIDEBAR ======================================
+with st.sidebar:
+    st.header("⚙️ Controls")
+    model_name = st.radio("Model", ["RandomForest", "LSTM"], horizontal=True)
+    threshold = st.slider("Alert threshold (risk)", 0.0, 1.0, 0.5, 0.05)
+    max_windows = st.number_input("Max windows (0 = whole file)",
+                                  min_value=0, value=0, step=50)
+    st.markdown("---")
+    ingest = st.radio("Data source",
+                      ["Upload file", "Demo artifact", "🌐 Live Traffic Stream"],
+                      key="src_ingest", horizontal=False)
+    if ingest != "Live Traffic Stream":
+        # never leave orphan capture threads running in the background
+        stale = st.session_state.pop("live_session", None)
+        if stale is not None:
+            stale.stop()
+    uploaded = None
+    demo_file = None
+    if ingest == "Demo artifact":
+        chosen = st.selectbox("Pick a CICIDS2017 day-file", list(DEMO_CSVS),
+                              key="src_demo")
+        demo_file = DEMO_CSVS[chosen]
+    elif ingest == "🌐 Live Traffic Stream":
+        from live_sniffer import list_interfaces
+        ifs = list_interfaces()
+        iface = st.selectbox("Interface", [i for i, _ in ifs],
+                             format_func=lambda n: f"{n} ({dict(ifs).get(n, '')})")
+        st.session_state["_live_iface"] = iface
+        replay = st.toggle("Replay demo stream (no root / no live traffic)",
+                           value=True, key="live_replay")
+        if replay:
+            st.caption("Feeds the committed Friday-DDoS window CSV at a rhythm "
+                       "you control — feature-identical to real capture.")
+            rate = st.slider("Replay rate (windows/sec)", 0.5, 10.0, 2.0, 0.5,
+                             key="live_rate")
+            st.session_state["_live_rate"] = rate
+        else:
+            st.session_state["_live_rate"] = 0
+    else:
+        uploaded = st.file_uploader(
+            "Upload a CICIDS2017 flow CSV, a pre-featurized window CSV, "
+            "or a PCAP", type=["csv", "pcap"])
+    with st.expander("ℹ️ System info"):
+        import sys
+        st.markdown(f"- **Python** {sys.version.split()[0]}\n"
+                    f"- **Streamlit** {st.__version__}\n"
+                    f"- **scikit-learn** {__import__('sklearn').__version__}\n"
+                    f"- **Window** = {WINDOW_SIZE} flows\n"
+                    f"- **Features** = 76-dim rolling")
+
+# ============================ TITLE ========================================
+st.title("🛡 SOC Command Center")
+st.caption(
+    "Forecasts **known attack progressions** up to 6 windows ahead · maps "
+    "alerts to MITRE ATT&CK · explains every prediction · novelty callout for "
+    "activity unlike anything in training. Workflow: FORECAST → DETECT → "
+    "EXPLAIN → INVESTIGATE → WHAT-IF → RESPOND → AUDIT.")
+
+# ============================ RESOLVE INPUT ================================
+is_pcap = False
+input_path = None
+if demo_file:
+    if os.path.exists(demo_file):
+        input_path = demo_file
+    else:
+        st.warning("Demo dataset not found locally. Upload a CSV/PCAP instead "
+                   "or clone the raw captures (git-ignored).")
+        input_path = None
+elif uploaded is not None:
+    is_pcap = uploaded.name.lower().endswith(".pcap")
+    strip = tempfile.NamedTemporaryFile(
+        suffix=".pcap" if is_pcap else ".csv", delete=False)
+    strip.write(uploaded.getbuffer())
+    strip_path = strip.name
+    strip.close()
+    input_path = strip_path
+
+# ==================== LIVE TRAFFIC STREAMING ================================
+if ingest == "🌐 Live Traffic Stream":
+
+    def _stop_live():
+        s = st.session_state.pop("live_session", None)
+        if s is not None:
+            s.stop()
+
+    is_replay = bool(st.session_state.get("_live_replay", True))
+    iface = st.session_state.get("_live_iface", "en0")
+
+    live_src = st.session_state.get("_live_source")
+    if live_src is None:
+        live_candidates = [
+            "dataset/demo_friday_ddos_windows.csv",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "dataset/demo_friday_ddos_windows.csv"),
+        ]
+        live_src = next((p for p in live_candidates if os.path.exists(p)),
+                        DEFAULT_LIVE_SOURCE)
+        st.session_state["_live_source"] = live_src
+
+    if is_replay:
+        rate = max(0.2, float(st.session_state.get("_live_rate", 2.0)))
+    else:
+        rate = 0.0
+
+    sess = st.session_state.get("live_session")
+    want = (
+        (rate if is_replay else 0.0),
+        iface,
+        is_replay,
+        live_src,
+        model_name,
+    )
+    cfg = st.session_state.get("_live_cfg")
+    if sess is None or cfg != want or not sess.state.snapshot().get("running"):
+        if sess is not None:
+            sess.stop()
+        new_engine = get_engine(model_name, threshold)
+        sess = LiveSession(
+            new_engine,
+            mode="replay" if is_replay else "sniff",
+            iface=iface,
+            source=live_src,
+            rate=rate if is_replay else 1.0,
+        )
+        st.session_state["live_session"] = sess
+        st.session_state["_live_cfg"] = want
+        st.session_state["_live_extra"] = None
+        sess.start()
+
+    lc1, lc2 = st.columns([2.4, 1])
+    with lc1:
+        st.markdown(
+            '<div class="sec-title"><h3>🌐 Live Traffic Stream</h3></div>',
+            unsafe_allow_html=True)
+    with lc2:
+        p1, p2 = st.columns([1.1, 1.6])
+        with p1:
+            st.markdown(
+                f"<span class='modepill {'replay' if is_replay else 'live'}'><i></i>"
+                f"{'REPLAY MODE' if is_replay else 'LIVE CAPTURE'}</span>",
+                unsafe_allow_html=True)
+        with p2:
+            st.button("⛔ Stop live capture", width="stretch",
+                      on_click=_stop_live)
+
+    @st.fragment(run_every=1.5)
+    def _live_panel():
+        snap = sess.state.snapshot()
+
+        if snap.get("error"):
+            st.error(f"❌ {snap['error']}\n\n"
+                     "Live interface capture needs packet-capture privileges "
+                     "(run the app with `sudo`, or switch to **Replay demo "
+                     "stream**) — the full pipeline below is otherwise live "
+                     "and identical.")
+        elif not snap.get("running") and snap["windows_total"] == 0:
+            st.info("🟢 **Listening** — capture is starting. Packets will "
+                    "fill 500-packet windows and stream forecasts here in "
+                    "real time.")
+
+        live = pd.DataFrame(snap["timeline"])
+        live_flagged = live[live["predicted_alert"]] if len(live) else pd.DataFrame()
+
+        d1, d2, d3, d4, d5 = st.columns(5)
+        status = "LIVE" if snap.get("running") else "IDLE"
+        d1.markdown(
+            f"<div class='metric-card'><span class='k'>Feed</span><br>"
+            f"<span style='font-family:var(--mono);font-weight:800'>"
+            f"{status}</span><br>"
+            f"<span class='dim'>{'replay' if is_replay else iface}</span></div>",
+            unsafe_allow_html=True)
+        d2.metric("Packets", f"{snap['packets']:,}")
+        d3.metric("Windows", snap["windows_total"])
+        d4.metric("⚠ Alerts", snap["alerts"])
+        d5.metric("Peak risk", f"{snap['peak_risk']:.2f}")
+
+        m1, m2 = st.columns(2)
+        with m1:
+            st.markdown(
+                f"<div class='card'><h4>Snapshot</h4>"
+                f"<span class='mono'>{snap['packets']:,} pkts · "
+                f"{snap['bytes_mb']} MB · <b>{snap['pps']:,.0f} pps</b> · "
+                f"{snap['elapsed']}s uptime</span><br>"
+                f"<span class='dim'>window {snap['current_window']}/500 "
+                f"{'in progress' if snap['running'] else '—'}</span></div>",
+                unsafe_allow_html=True)
+        with m2:
+            la = snap.get("last_alert") or {}
+            if la:
+                st.markdown(
+                    f"<div class='card crit'><h4>Latest alert — "
+                    f"w{la.get('window_id')}</h4>"
+                    f"<span class='mono'>{la.get('attack_family')} · "
+                    f"{la.get('mitre_stage')} · risk {la.get('risk_score')}</span>"
+                    f"</div>", unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    "<div class='card'><h4>Latest alert</h4>"
+                    "<span class='dim'>none yet — keep streaming…</span></div>",
+                    unsafe_allow_html=True)
+
+        if len(live):
+            base = alt.Chart(live).encode(
+                x=alt.X("window_id:Q", title="Live window"),
+                y=alt.Y("risk_score:Q", title="Risk",
+                        scale=alt.Scale(domain=[0, 1])))
+            layers = [base.mark_area(opacity=0.12, color="#3b82f6", line=False),
+                      base.mark_line(color="#3b82f6", strokeWidth=2)]
+            if len(live_flagged):
+                layers.append(
+                    alt.Chart(live_flagged).mark_circle(color="#ef4444",
+                                                        size=70).encode(
+                        x=alt.X("window_id:Q"), y=alt.Y("risk_score:Q")))
+            layers.append(alt.Chart(pd.DataFrame({"y": [threshold]})).mark_rule(
+                color="#fbbf24", strokeDash=[5, 4]).encode(y="y:Q"))
+            st.altair_chart(alt.layer(*layers).properties(height=260)
+                            .interactive(), width="stretch")
+        else:
+            st.altair_chart(alt.Chart(pd.DataFrame({"x": [0], "y": [0]})).mark_line()
+                            .properties(height=80), width="stretch")
+
+        st.markdown(
+            '<div class="sec-title"><h4>Live incident correlation</h4></div>',
+            unsafe_allow_html=True)
+        if snap["incidents"]:
+            inc_rows = [{
+                "ID": i["incident_id"], "Family": i["family"], "Stage": i["stage"],
+                "First": f"w{i['first_window']}", "Last": f"w{i['last_window']}",
+                "Wins": i["duration_windows"], "Peak": i["peak_risk"],
+                "Severity": i["severity"], "Priority": i["priority"],
+            } for i in snap["incidents"]]
+            st.dataframe(pd.DataFrame(inc_rows), width="stretch")
+        else:
+            st.caption("No closed incidents yet — alerts accrue across "
+                       "contiguous windows before correlation locks one in.")
+
+        with st.expander("Live alert log", expanded=True):
+            if len(live_flagged):
+                cols = ["window_id", "attack_family", "mitre_stage",
+                        "risk_score"]
+                show = live_flagged[cols].copy()
+                show.columns = ["Window", "Family", "MITRE stage", "Risk"]
+                st.dataframe(show.tail(40), width="stretch")
+            else:
+                st.caption("No alerts in the live stream so far.")
+
+    _live_panel()
+    st.stop()
+
+# ============================ EMPTY STATE ==================================
+def _launch_demo():
+    st.session_state["src_ingest"] = "Demo artifact"
+    st.session_state["src_demo"] = "Friday DDoS (recommended)"
+
+
+if input_path is None:
+    ec1, ec2, ec3 = st.columns([1.2, 2.2, 1.2])
+    with ec2:
+        st.markdown("""
+        <div class="hero" style="text-align:center; padding:40px 28px">
+          <div class="kicker">Security operations · standing by</div>
+          <h1 style="font-size:2rem">READY WHEN YOU ARE</h1>
+          <div class="sub" style="margin:0 auto">Pick a data source in the
+          sidebar or hit <b>Run Demo</b> to analyze the committed Friday DDoS
+          sample (<b>452 windows · 358 alerts</b>) — the recommended showcase.
+          Or stream: <b>🌐 Live Traffic Stream</b> replays the demo at your own
+          rhythm without root.</div>
+          <div class="hk" style="justify-content:center">
+            <span class="chip">Flow CSV</span>
+            <span class="chip">PCAP</span>
+            <span class="chip">Live stream</span>
+            <span class="chip">Demo artifact</span>
+          </div>
+        </div>""", unsafe_allow_html=True)
+        st.button("🚀 Run Friday DDoS Demo", type="primary",
+                  width="stretch", on_click=_launch_demo)
+        st.caption("Or upload your own CSV / PCAP from the sidebar controls.")
+    st.stop()
+
+# ============================ INFERENCE ====================================
+engine = get_engine(model_name, threshold)
+tmp_path = input_path
+pcap_extras = None
+t0 = time.time()
+try:
+    if is_pcap:
+        from packet_features import pcap_to_windows_csv
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as t:
+            tmp_path = t.name
+        with st.spinner("Parsing PCAP → flow windows…"):
+            pcap_to_windows_csv(input_path, tmp_path)
+        pcap_extras = pd.read_csv(tmp_path)
+    with st.spinner("Streaming inference… this runs offline; big files take a moment."):
+        timeline, summary = run_inference(tmp_path, engine,
+                                           max_windows=int(max_windows))
+finally:
+    if uploaded is not None:
+        os.unlink(input_path)
+        if tmp_path != input_path:
+            os.unlink(tmp_path)
+elapsed = time.time() - t0
+
+if not timeline:
+    st.warning("No windows produced. Check the CSV schema.")
+    st.stop()
+
+tl = pd.DataFrame(timeline)
+if "zero_day" in tl.columns:
+    tl["zero_day_likely"] = tl["zero_day"].apply(
+        lambda z: bool(z and z.get("zero_day_likely")))
+    tl["novelty_pctl"] = tl["zero_day"].apply(
+        lambda z: z.get("novelty_pctl") if z else None)
+flagged = tl[tl["predicted_alert"]]
+src_label = f"Demo:{chosen}" if demo_file else (f"Upload:{uploaded.name}" if uploaded else "—")
+
+# lead-time: windows from earliest real attack onset to the model's first alert
+first_alert_win = int(flagged["window_id"].min()) if len(flagged) else None
+lead_str = "—"
+if len(flagged):
+    if "gt_family" in tl.columns:
+        g_att = tl[tl["gt_family"].map(lambda g: str(g).strip().lower() != "none")]
+        if len(g_att):
+            onset = int(g_att["window_id"].min())
+            lead_wins = max(0, first_alert_win - onset)
+            lead_str = f"{lead_wins}w{' on-time' if lead_wins == 0 else ''}"
+        else:
+            lead_str = f"w{first_alert_win}"
+    else:
+        lead_str = f"w{first_alert_win}"
+
+# ============================ CONTEXT BAR ==================================
+st.markdown(
+    f"<div class='ctxbar'>"
+    f"<span class='k'>Model</span> <span class='v'>{model_name}</span>"
+    f"<span class='sep'>·</span>"
+    f"<span class='k'>Threshold</span> <span class='v'>{threshold:.2f}</span>"
+    f"<span class='sep'>·</span>"
+    f"<span class='k'>Source</span> <span class='v'>{src_label}</span>"
+    f"<span class='sep'>·</span>"
+    f"<span class='k'>Windows</span> <span class='v'>{summary['windows_processed']}</span>"
+    f"<span class='sep'>·</span>"
+    f"<span class='k'>Alerts</span> <span class='v'>{summary['flagged_windows']}</span>"
+    f"<span class='sep'>·</span>"
+    f"<span class='k'>First</span> <span class='v'>w{first_alert_win}</span>"
+    f"<span class='sep'>·</span>"
+    f"<span class='k'>Lead</span> <span class='v'>{lead_str}</span>"
+    f"<span class='sep'>·</span>"
+    f"<span class='k'>⏱</span> <span class='v'>{elapsed:.1f}s</span>"
+    f"</div>", unsafe_allow_html=True)
+
+# ============================ COMMAND =====================================
+# Threat picture assembled from the current run — real windows, real alerts,
+# real correlations. Also pre-selects which window the INVESTIGATION center
+# opens first.
+try:
+    incidents = correlate_incidents(tl.to_dict("records"))
+    if incidents:
+        st.session_state["incident_export"] = json.dumps(incidents, indent=2)
+except Exception:
+    incidents = []
+
+peak = float(summary.get("peak_risk", 0.0) or 0.0)
+flag_rate = float(summary.get("flag_rate", 0.0) or 0.0)
+
+st.markdown(
+    '<div class="sec-title"><h3>Command</h3></div>', unsafe_allow_html=True)
+
+st.markdown(
+    f"""
+<div class="telem">
+  <div class="tm"><div class="ev"><i class='t-{'r' if len(flagged) else 'g'}'></i>Threats</div>
+    <div class="num {'re' if len(flagged) else 'gd'}">{len(flagged)}</div></div>
+  <div class="tm"><div class="ev"><i class='t-a'></i>Active incidents</div>
+    <div class="num am">{len(incidents)}</div></div>
+  <div class="tm"><div class="ev"><i class='t-g'></i>Windows</div>
+    <div class="num cy">{summary['windows_processed']}</div></div>
+  <div class="tm"><div class="ev"><i class='t-a'></i>Flag rate</div>
+    <div class="num am">{flag_rate:.1%}</div></div>
+  <div class="tm"><div class="ev"><i class='t-r'></i>Peak risk</div>
+    <div class="num re">{peak:.3f}</div></div>
+</div>
+""", unsafe_allow_html=True)
+
+cc1, cc2 = st.columns([1.6, 1])
+with cc1:
+    st.markdown(
+        '<div class="netwrap"><div class="net-label">'
+        '<span>Network activity map</span>'
+        '<span>nodes = active families · edges weighted by flags</span></div>'
+        + netgraph_html(tl, flagged) + "</div>",
+        unsafe_allow_html=True)
+with cc2:
+    threat_html = ("<div class='queue'><div class='qhead'><b>Threat queue</b>"
+                   "<span>by risk</span></div>")
+    if len(flagged):
+        top = flagged.sort_values("risk_score", ascending=False).head(5)
+        for _, r in top.iterrows():
+            threat_html += (
+                f"<div class='qrow'><span class='qid'>w<b>{int(r['window_id'])}</b></span>"
+                f"<span class='qfam'>{html.escape(str(r['attack_family']))}</span>"
+                f"<span class='qrisk'>{r['risk_score']:.3f}</span></div>")
+    else:
+        threat_html += ("<div class='qrow'><span class='qid'><b>CLEAR</b></span>"
+                        "<span class='qdrv'>no threats at threshold</span>"
+                        "<span class='qrisk'>—</span></div>")
+    threat_html += "</div>"
+    st.markdown(threat_html, unsafe_allow_html=True)
+
+    inc_html = ("<div class='queue' style='margin-top:12px'>"
+                "<div class='qhead'><b>Incident queue</b><span>correlated</span></div>")
+    if incidents:
+        for i in incidents:
+            inc_html += (
+                f"<div class='qrow'><span class='qid'>"
+                f"#{i['incident_id']} · <b>{i.get('priority','?')}</b></span>"
+                f"<span class='qfam'>{html.escape(str(i['family']))}</span>"
+                f"<span class='qrisk'>{i['peak_risk']:.3f}</span></div>")
+    else:
+        inc_html += ("<div class='qrow'><span class='qid'><b>—</b></span>"
+                     "<span class='qdrv'>none yet</span><span class='qrisk'>—</span></div>")
+    inc_html += "</div>"
+    st.markdown(inc_html, unsafe_allow_html=True)
+
+invest_opts = flagged["window_id"].astype(int).tolist()
+if len(invest_opts):
+    st.selectbox("🔬 Open a threat window in INVESTIGATION", invest_opts,
+                 format_func=lambda w: f"Window #{int(w)}",
+                 index=0, key="cmd_invest")
+    st.caption("The chosen window is pre-selected in the 🔬 INVESTIGATION "
+               "center below.")
+else:
+    st.session_state.pop("cmd_invest", None)
+
+wf_steps = [
+    ("INGEST", True),
+    ("FORECAST", True),
+    ("ALERT", len(flagged) > 0),
+    ("THREAT", len(flagged) > 0),
+    ("CORRELATE", len(incidents) > 0),
+    ("AUDIT", bool(len(ledger.chain))),
+]
+st.markdown(
+    '<div class="sec-title"><h4>Event workflow</h4></div>', unsafe_allow_html=True)
+st.markdown(event_flow_html([t for _, t in wf_steps]), unsafe_allow_html=True)
+st.caption("Stage states are read from the current run and the ledger — "
+           "nothing here is simulated.")
+
+# ================= DETECTION QUALITY (vs ground truth) ====================
+# Exclude engine warm-up rows (no prediction was made) from the confusion
+# count, and skip entirely when ground-truth labels are unavailable.
+has_truth = "gt_family" in tl.columns and tl["gt_family"].notna().any()
+try:
+    if "warming_up" in tl.columns:
+        scored = tl[~tl["warming_up"].astype(bool)].copy()
+    else:
+        scored = tl.copy()
+    if has_truth and len(scored):
+        gt_attack = scored["gt_family"].map(lambda g: str(g).strip().lower() != "none")
+        pred_alert = scored["predicted_alert"].astype(bool)
+        tp = int((gt_attack & pred_alert).sum())
+        fp = int((~gt_attack & pred_alert).sum())
+        fn = int((gt_attack & ~pred_alert).sum())
+        precision = tp / (tp + fp) if (tp + fp) else 0.0
+        recall = tp / (tp + fn) if (tp + fn) else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+        true_neg = int(len(scored) - tp - fp - fn)
+        scored_n = len(scored)
+    else:
+        tp = fp = fn = 0; precision = recall = f1 = 0.0; true_neg = 0; scored_n = 0
+except Exception:
+    tp = fp = fn = 0; precision = recall = f1 = 0.0; true_neg = 0; scored_n = 0
+
+if has_truth and scored_n:
+    st.session_state["det_metrics"] = {
+        "precision": round(precision, 4), "recall": round(recall, 4),
+        "f1": round(f1, 4), "tp": tp, "fp": fp, "fn": fn, "tn": true_neg,
+        "windows_evaluated": scored_n,
+    }
+
+if has_truth:
+    st.markdown(f"""
+    <div style="font-size:.78rem;letter-spacing:.06em;color:var(--dim);margin:6px 0 4px;
+        text-transform:uppercase">Detection quality · vs ground-truth labels</div>
+    <div class="metric-grid glass">
+      <div class="mq"><span class="mile">Precision</span><span class="miv g">{precision:.2%}</span></div>
+      <div class="mq"><span class="mile">Recall</span><span class="miv c">{recall:.2%}</span></div>
+      <div class="mq"><span class="mile">F1</span><span class="miv v">{f1:.2%}</span></div>
+      <div class="mq"><span class="mile">TP</span><span class="miv g">{tp}</span></div>
+      <div class="mq"><span class="mile">FP</span><span class="miv r">{fp}</span></div>
+      <div class="mq"><span class="mile">FN</span><span class="miv o">{fn}</span></div>
+    </div>""", unsafe_allow_html=True)
+
+    if len(flagged):
+        st.markdown(f"""
+        <div style="font-size:.78rem;letter-spacing:.06em;color:var(--dim);margin:10px 0 4px;
+            text-transform:uppercase">Earliest warnings · model fired first</div>
+        <div class="feed-window">
+        """, unsafe_allow_html=True)
+        for _, r in list(flagged.head(6).iterrows()):
+            fcls, _ = risk_badge(r["risk_score"])
+            right = "hit" if str(r.get("gt_family", "")).strip().lower() != "none" else "miss"
+            rcolor = "#4ade80" if right == "hit" else "#f87171"
+            st.markdown(
+                f"<div class='feed-row'><span class='fw'>{int(r['window_id'])}</span>"
+                f"<span class='fam'>{html.escape(str(r['attack_family']))}</span>"
+                f"<span class='risk'>{r['risk_score']:.3f}</span>"
+                f"<span class='truth' style='color:{rcolor}'>{right}</span></div>",
+                unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+# ================= INCIDENT INTELLIGENCE (correlation) ====================
+try:
+    if incidents and len(flagged):
+        st.markdown(
+            '<div style="font-size:.78rem;letter-spacing:.06em;color:var(--dim);'
+            'margin:14px 0 4px;text-transform:uppercase">Incident intelligence · '
+            'correlated alerts</div>', unsafe_allow_html=True)
+        ic = "".join(
+            f"<div class='incident-row'>"
+            f"<span class='iid'>#{i['incident_id']}</span>"
+            f"<span class='iwin'>w{i['first_window']}–w{i['last_window']} "
+            f"(<b>{i['windows']}</b>)</span>"
+            f"<span class='ifam'>{html.escape(str(i['family']))}</span>"
+            f"<span class='istage'>{html.escape(str(i['stage']))}</span>"
+            f"<span class='ipri pri-{i.get('priority','MEDIUM').lower()}'>{i.get('priority','?')}</span>"
+            f"<span class='ipeak'>{i['peak_risk']:.3f}</span>"
+            f"</div>" for i in incidents)
+        st.markdown(f"<div class='incident-window glass'>{ic}</div>",
+                    unsafe_allow_html=True)
+        st.caption("Alert windows grouped into incidents (gap ≤ 2 wins and same "
+                   "family). Shows attack onset, duration, peak risk, MITRE stage "
+                   "and a composite severity/priority score.")
+        st.download_button(
+            "⬇ Export incident timeline (JSON)",
+            data=json.dumps(incidents, indent=2),
+            file_name="netsight_incidents.json",
+            mime="application/json",
+            help="Download the correlated incident summary as structured JSON "
+                 "for import into a SIEM or case-management tool.")
+
+        # ---- severity distribution across incidents ----
+        if len(incidents) > 1:
+            sev_df = pd.DataFrame([{
+                "incident": f"#{i['incident_id']}",
+                "severity": i["severity"],
+                "priority": i.get("priority", "MEDIUM"),
+            } for i in incidents])
+            sev_chart = alt.Chart(sev_df).mark_bar(cornerRadiusEnd=3).encode(
+                x=alt.X("incident:N", title=None),
+                y=alt.Y("severity:Q", title="severity (0–1)",
+                        scale=alt.Scale(domain=[0, 1])),
+                color=alt.Color("priority:N",
+                                scale=alt.Scale(domain=["LOW", "MEDIUM", "HIGH", "CRITICAL"],
+                                                range=["#4ade80", "#fbbf24", "#fb923c", "#ef4444"])),
+                tooltip=["incident:N", "priority:N",
+                         alt.Tooltip("severity:Q", format=".3f")],
+            ).properties(height=180)
+            st.markdown(
+                '<div style="font-size:.72rem;letter-spacing:.08em;color:var(--dim);'
+                'text-transform:uppercase;margin:6px 0 2px">Severity across incidents'
+                '</div>', unsafe_allow_html=True)
+            st.altair_chart(sev_chart, width="stretch")
+
+        # ---- incident narrative report (markdown) ----
+        try:
+            md = ["# NetSight — Correlated Incident Report",
+                  f"**Model:** {model_name} · **Threshold:** {threshold:.2f} · "
+                  f"**Source:** {src_label}",
+                  f"**Total incidents:** {len(incidents)} · **Alert windows:** "
+                  f"{len(flagged)}",
+                  "", "| # | Priority | Window span | Duration (w) | ~Flows | "
+                  "Peak risk | Family | MITRE stage | Sev |",
+                  "|---|---------|-------------|--------------|--------|--------|-------|-------------|-----|"]
+            for i in incidents:
+                md.append(
+                    f"| {i['incident_id']} | {i.get('priority','?')} | "
+                    f"w{i['first_window']}–w{i['last_window']} | {i['duration_windows']} | "
+                    f"{i['estimated_flows']:,} | {i['peak_risk']:.3f} | {i['family']} | "
+                    f"{i['stage']} | {i['severity']:.3f} |")
+            md += ["", "## Narrative", ""]
+            for i in incidents:
+                md.append(
+                    f"### Incident #{i['incident_id']} — {i.get('priority','UNKNOWN')} "
+                    f"({i['family']})")
+                md.append(
+                    f"- Detected from **window {i['first_window']}** to "
+                    f"**window {i['last_window']}** ({i['duration_windows']} windows, "
+                    f"~{i['estimated_flows']:,} flows).")
+                md.append(f"- Peak risk **{i['peak_risk']:.3f}**; composite severity "
+                          f"**{i['severity']:.3f}**.")
+                md.append(f"- Mapped to MITRE stage **{i['stage']}**.")
+                md.append("")
+            report_md = "\n".join(md)
+            st.download_button(
+                "📄 Export incident narrative report (Markdown)",
+                data=report_md,
+                file_name="netsight_incident_report.md",
+                mime="text/markdown",
+                help="Human-readable markdown summary of all correlated "
+                     "incidents, ready to paste into a ticketing or case tool.",
+                key="dl_narrative")
+        except Exception:
+            pass
+
+        # ---- incident detail expander ----
+        with st.expander(f"🔎 Incident drill-down ({len(incidents)} incidents)"):
+            try:
+                # generate a SOC PDF forensic report for a chosen incident
+                pdf_opts = ["Incident #{} — {} ({} windows)".format(
+                    i["incident_id"], i.get("priority", "?"), i["windows"])
+                    for i in incidents]
+                pdf_sel = st.selectbox("Generate SOC PDF report for", pdf_opts,
+                                       index=0, key="incident_pdf_sel")
+                chosen_inc = incidents[int(pdf_sel.split("—")[0].replace("Incident #", "").strip()) - 1]
+                if st.button("📄 Generate forensic PDF report", key="incident_pdf_btn"):
+                    alert_win = chosen_inc["first_window"]
+                    prow = flagged[flagged["window_id"].astype(int) == alert_win]
+                    if len(prow):
+                        pr = prow.iloc[0]
+                        intel = defense.get_mitre_intel(pr["attack_family"])
+                        meta = family_meta(pr["attack_family"])
+                        attr = pr.get("attribution") or {}
+                        reasoning = meta["description"] + (". " + ", ".join(
+                            f"{k} {v:+.3f}" for k, v in list(attr.items())[:5]) if attr else "")
+                        inc2 = {
+                            "attack_family": pr["attack_family"],
+                            "severity": chosen_inc.get("priority", "HIGH"),
+                            "cvss_score": intel["cvss_score"],
+                            "src_ip": "attacker.example",
+                            "dst_ip": "target.example",
+                            "dst_port": 80,
+                            "window_id": int(alert_win),
+                            "risk_score": chosen_inc["peak_risk"],
+                            "mitre_tactic": intel["tactic"],
+                            "mitre_id": intel["technique_id"],
+                            "mitre_name": intel["technique_name"],
+                            "cve_example": intel["cve_example"],
+                            "forensic_reasoning": (reasoning +
+                                                   f" Correlated incident #{chosen_inc['incident_id']}, "
+                                                   f"{chosen_inc['duration_windows']} windows from w"
+                                                   f"{chosen_inc['first_window']}–w{chosen_inc['last_window']}."),
+                            "recommended_action": intel["recommended_action"],
+                            "iptables_cmd": defense.generate_firewall_rules(
+                                "attacker.example", 80, pr["attack_family"])["iptables"],
+                            "block_hash": "CORRELATED-INCIDENT-" + str(chosen_inc["incident_id"]),
+                        }
+                        pdf_path = generate_pdf_report(inc2, os.path.join(
+                            tempfile.gettempdir(), f"Incident_{chosen_inc['incident_id']}_Report.pdf"))
+                        st.session_state["last_report"] = pdf_path
+                        st.success(f"Report generated for Incidents #{chosen_inc['incident_id']}.")
+                pdf_path2 = st.session_state.get("last_report")
+                if pdf_path2 and os.path.exists(pdf_path2):
+                    ext = pdf_path2.rsplit(".", 1)[-1]
+                    mime = "application/pdf" if ext == "pdf" else "text/plain"
+                    with open(pdf_path2, "rb") as fh:
+                        st.download_button(
+                            label="⬇ Download SOC report",
+                            data=fh.read(),
+                            file_name=os.path.basename(pdf_path2),
+                            mime=mime, key="dl_incident_pdf")
+                st.markdown("<div style='border-top:1px dashed rgba(148,163,184,.15);"
+                            "margin:10px 0'></div>", unsafe_allow_html=True)
+            except Exception:
+                pass
+            for inc in incidents:
+                iwid_start, iwid_end = inc["first_window"], inc["last_window"]
+                sub = tl[(tl["window_id"].astype(int) >= iwid_start) &
+                         (tl["window_id"].astype(int) <= iwid_end)]
+                st.markdown(
+                    f"<div style='margin:14px 0 4px'><span class='ipri "
+                    f"pri-{inc.get('priority','MEDIUM').lower()}'>{inc.get('priority','?')}"
+                    f"</span> <b>Incident #{inc['incident_id']}</b>"
+                    f" <span style='color:var(--dim)'>w{iwid_start}–w{iwid_end}"
+                    f" · {inc['duration_windows']} windows · ~{inc['estimated_flows']:,} "
+                    f"flows · severity {inc['severity']:.3f}</span></div>",
+                    unsafe_allow_html=True)
+                if len(sub) and "risk_score" in sub:
+                    hist = alt.Chart(sub).mark_bar(cornerRadiusEnd=2).encode(
+                        x=alt.X("window_id:O", title="window"),
+                        y=alt.Y("risk_score:Q", title="risk",
+                                scale=alt.Scale(domain=[0, 1])),
+                        color=alt.condition(alt.datum.predicted_alert,
+                                            alt.value("#ef4444"),
+                                            alt.value("#3b82f6")),
+                        tooltip=[alt.Tooltip("window_id:O", title="window"),
+                                 alt.Tooltip("risk_score:Q", title="risk", format=".3f")],
+                    ).properties(height=110)
+                    st.altair_chart(hist, width="stretch")
+                fams = sub["attack_family"].value_counts().head(3)
+                if len(fams):
+                    st.caption("Families: " + ", ".join(
+                        f"<b style='color:var(--text)'>{html.escape(str(f))}</b> ×{c}"
+                        for f, c in fams.items()))
+                drivers = {}
+                for _, r in sub.iterrows():
+                    for k, v in (r.get("attribution") or {}).items():
+                        drivers[k] = drivers.get(k, 0.0) + abs(float(v))
+                if drivers:
+                    topd = sorted(drivers.items(), key=lambda kv: -kv[1])[:5]
+                    chipc = "".join(
+                        f"<span class='chip r'>{html.escape(str(k))}</span>"
+                        for k, _ in topd)
+                    st.markdown(f"<div style='font-size:.62rem;text-transform:uppercase;"
+                                f"letter-spacing:.08em;color:var(--dim)'>Top drivers "
+                                f"across incident</div><div>{chipc}</div>",
+                                unsafe_allow_html=True)
+                st.markdown("<div style='border-top:1px dashed rgba(148,163,184,.15);"
+                            "margin:10px 0'></div>", unsafe_allow_html=True)
+    else:
+        st.caption("No alert windows to correlate into incidents at the current "
+                   "threshold.")
+except Exception:
+    pass
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "🔭 DETECTION", "🔬 INVESTIGATION", "⚡ RESPONSE",
+    "🌐 INTELLIGENCE", "📜 FORENSICS", "📦 REPORTS"])
+
+# ==========================================================================
+# TAB 1 — DETECTION (forecaster)
+# ==========================================================================
+with tab1:
+    # ---- RF vs LSTM side-by-side comparison ----
+    with st.expander("⚖️ Compare engines (RandomForest vs LSTM) on this input"):
+        st.markdown("Runs **both** engines on the first few windows of the "
+                    "current input and compares how they agree. Sampling keeps "
+                    "it fast — use it to see where a statistical forecaster "
+                    "and a sequence world-model diverge.")
+        cmp_n = st.slider("Windows to compare", 50, 400, 200, step=50,
+                          key="cmp_n", help="Larger = slower; smaller = faster")
+        cmp_note = ""
+        if st.button("⚔️ Run engine comparison", type="secondary",
+                     key="run_cmp"):
+            try:
+                from infer import RandomForestEngine, LSTMEngine, run_inference as _ri
+                with st.spinner("Running both engines…"):
+                    cmp_rf, srf = _ri(input_path, RandomForestEngine(threshold=threshold),
+                                      max_windows=int(cmp_n))
+                    cmp_ls, sls = _ri(input_path, LSTMEngine(threshold=threshold),
+                                      max_windows=int(cmp_n))
+                df_rf = pd.DataFrame(cmp_rf)
+                df_ls = pd.DataFrame(cmp_ls)
+                n = min(len(df_rf), len(df_ls))
+                df_rf = df_rf.head(n).reset_index(drop=True)
+                df_ls = df_ls.head(n).reset_index(drop=True)
+                agree_alerts = int(((df_rf["predicted_alert"].astype(bool)) ==
+                                    (df_ls["predicted_alert"].astype(bool))).sum())
+                both_alerts = int((df_rf["predicted_alert"].astype(bool) &
+                                   df_ls["predicted_alert"].astype(bool)).sum())
+                only_rf = int((df_rf["predicted_alert"].astype(bool) &
+                               ~df_ls["predicted_alert"].astype(bool)).sum())
+                only_ls = int((~df_rf["predicted_alert"].astype(bool) &
+                               df_ls["predicted_alert"].astype(bool)).sum())
+                st.markdown(
+                    f"<div class='metric-grid glass'>"
+                    f"<div class='mq'><span class='mile'>Agreement</span>"
+                    f"<span class='miv g'>{agree_alerts/n:.1%}</span></div>"
+                    f"<div class='mq'><span class='mile'>Both alert</span>"
+                    f"<span class='miv c'>{both_alerts}</span></div>"
+                    f"<div class='mq'><span class='mile'>RF only</span>"
+                    f"<span class='miv o'>{only_rf}</span></div>"
+                    f"<div class='mq'><span class='mile'>LSTM only</span>"
+                    f"<span class='miv v'>{only_ls}</span></div>"
+                    f"<div class='mq'><span class='mile'>Peak RF</span>"
+                    f"<span class='miv b'>{df_rf['risk_score'].max():.3f}</span></div>"
+                    f"<div class='mq'><span class='mile'>Peak LSTM</span>"
+                    f"<span class='miv b'>{df_ls['risk_score'].max():.3f}</span></div>"
+                    f"</div>", unsafe_allow_html=True)
+                dou = pd.DataFrame({
+                    "window_id": df_rf["window_id"].astype(int),
+                    "RF": df_rf["risk_score"],
+                    "LSTM": df_ls["risk_score"],
+                }).melt("window_id", var_name="engine", value_name="risk")
+                cmp_chart = alt.Chart(dou).mark_line().encode(
+                    x=alt.X("window_id:Q", title="window"),
+                    y=alt.Y("risk:Q", title="risk",
+                            scale=alt.Scale(domain=[0, 1])),
+                    color=alt.Color("engine:N", scale=alt.Scale(
+                        domain=["RF", "LSTM"], range=["#3b82f6", "#a78bfa"])),
+                    tooltip=["window_id:O", "engine:N",
+                             alt.Tooltip("risk:Q", format=".3f")],
+                ).properties(height=260).interactive()
+                st.altair_chart(cmp_chart, width="stretch")
+                st.caption("Blue = RandomForest · Violet = LSTM. Where the lines "
+                           "diverge, the two models disagree on risk — inspect "
+                           "attribution in 🔬 Explainability.")
+            except Exception as e:
+                st.error(f"Comparison failed on this input: {type(e).__name__}")
+        else:
+            st.caption("Press **Run engine comparison** to populate the comparison.")
+
+    if is_pcap and pcap_extras is not None and not pcap_extras.empty:
+        st.subheader("Packet-level features (per 500-packet window)")
+        cols = ["window_id", "packet_rate", "byte_rate", "syn_only_rate",
+                "retrans_ratio", "ttl_std", "tcp_win_mean", "frag_ratio",
+                "icmp_ratio", "attack_family", "heuristic_stage"]
+        cols = [c for c in cols if c in pcap_extras.columns]
+        st.dataframe(pcap_extras[cols].set_index("window_id").head(80),
+                     width="stretch", height=220)
+
+    st.markdown('<div class="sec-title"><h3>Forecast timeline</h3></div>',
+                unsafe_allow_html=True)
+    st.altair_chart(timeline_chart(tl, flagged, threshold), width="stretch")
+
+    # ---- ATTACK PROGRESSION SCRUBBER ----
+    if len(tl):
+        wmin, wmax = int(tl["window_id"].min()), int(tl["window_id"].max())
+        scrub_w = st.slider("Scrub timeline", wmin, wmax, wmin,
+                            key="scrub_timeline",
+                            help="Pick a window to inspect its risk, family, and MITRE stage.")
+        srow = tl[tl["window_id"].astype(int) == scrub_w]
+        if len(srow):
+            sr = srow.iloc[0]
+            sr_cls, sr_lab = risk_badge(sr["risk_score"])
+            gt_hit = str(sr.get("gt_family", "none")).strip().lower() != "none"
+            gt_color = "#4ade80" if gt_hit else "#94a3b8"
+            gt_label = "attack" if gt_hit else "benign"
+            atc = int(sr.get("predicted_alert", False))
+            atc_color = "#f87171" if atc else "#94a3b8"
+            atc_label = "ALERT" if atc else "clear"
+            st.markdown(
+                f"<div class='glass' style='padding:18px 22px; margin:8px 0 12px; "
+                f"border-left:3px solid {_cls_col(sr_cls)}'>"
+                f"<div style='display:grid; grid-template-columns:auto 1fr 1fr 1fr 1fr auto; "
+                f"gap:20px; align-items:center'>"
+                f"<div><span style='font-family:var(--mono); font-weight:800; font-size:1.35rem; "
+                f"color:#e2e8f0'>W{scrub_w}</span></div>"
+                f"<div><span style='font-size:.64rem; text-transform:uppercase; color:#64748b; "
+                f"letter-spacing:.08em'>Risk</span><br>"
+                f"<span style='font-family:var(--mono); font-weight:700; font-size:1.1rem; "
+                f"color:{_cls_col(sr_cls)}'>"
+                f"{sr['risk_score']:.3f}</span></div>"
+                f"<div><span style='font-size:.64rem; text-transform:uppercase; color:#64748b; "
+                f"letter-spacing:.08em'>Family</span><br>"
+                f"<span style='font-family:var(--mono); font-weight:600; font-size:.95rem; "
+                f"color:#e2e8f0'>{html.escape(str(sr['attack_family']))}</span></div>"
+                f"<div><span style='font-size:.64rem; text-transform:uppercase; color:#64748b; "
+                f"letter-spacing:.08em'>MITRE</span><br>"
+                f"<span style='font-family:var(--mono); font-weight:600; font-size:.95rem; "
+                f"color:#93c5fd'>{html.escape(str(sr['mitre_stage']))}</span></div>"
+                f"<div><span style='font-size:.64rem; text-transform:uppercase; color:#64748b; "
+                f"letter-spacing:.08em'>GT / Model</span><br>"
+                f"<span style='font-family:var(--mono); font-size:.82rem'>"
+                f"<span style='color:{gt_color}'>{gt_label}</span> → "
+                f"<span style='color:{atc_color}'>{atc_label}</span></span></div>"
+                f"</div></div>", unsafe_allow_html=True)
+
+    # ---- threat-matrix heatmap: attack family x risk across windows ----
+    if "attack_family" in tl.columns and len(tl):
+        fam = tl["attack_family"].fillna("none").astype(str)
+        fam = fam.map(lambda x: "benign" if x == "none" else x)
+        try:
+            hdf = tl.assign(_fam=fam)
+            heat = alt.Chart(hdf).mark_rect().encode(
+                x=alt.X("window_id:O", title="Window"),
+                y=alt.Y("_fam:N", title="attack family"),
+                color=alt.Color("risk_score:Q",
+                                scale=alt.Scale(scheme="blues", domain=[0.2, 1.0]),
+                                title="risk"),
+                tooltip=[alt.Tooltip("window_id:O", title="window"),
+                         alt.Tooltip("_fam:N", title="family"),
+                         alt.Tooltip("risk_score:Q", title="risk", format=".3f"),
+                         alt.Tooltip("mitre_stage:N", title="MITRE")],
+            ).properties(height=200)
+            st.markdown('<div class="sec-title"><h3>Threat matrix</h3></div>',
+                        unsafe_allow_html=True)
+            st.altair_chart(heat, width="stretch")
+            st.caption("Per-window risk as a heatmap by predicted attack family — "
+                       "visualizes which families are active and when.")
+        except Exception:
+            pass
+
+    # ---- attack narrative timeline (Gantt-style, family x windows) ----
+    try:
+        if "attack_family" in tl.columns and len(tl):
+            fam = tl["attack_family"].fillna("none").astype(str)
+            fam = fam.map(lambda x: "benign" if x == "none" else x)
+            gdf = tl.assign(_fam=fam)
+            gdf = gdf[gdf["_fam"] != "benign"]
+            if len(gdf):
+                gantt = alt.Chart(gdf).mark_bar(cornerRadiusEnd=2).encode(
+                    x=alt.X("window_id:O", title="window"),
+                    y=alt.Y("_fam:N", title="attack family"),
+                    color=alt.Color("_fam:N", legend=None,
+                                    scale=alt.Scale(
+                                        domain=sorted(gdf["_fam"].unique()),
+                                        range=["#22d3ee", "#f87171", "#a78bfa",
+                                               "#fbbf24", "#4ade80", "#60a5fa"])),
+                    tooltip=[alt.Tooltip("window_id:O", title="window"),
+                             alt.Tooltip("_fam:N", title="family"),
+                             alt.Tooltip("risk_score:Q", title="risk", format=".3f"),
+                             alt.Tooltip("mitre_stage:N", title="MITRE")],
+                ).properties(height=120)
+                st.markdown('<div class="sec-title"><h3>Attack narrative timeline</h3></div>',
+                            unsafe_allow_html=True)
+                st.altair_chart(gantt, width="stretch")
+                st.caption("Each bar = an alert window colored by attack family. "
+                           "Reads like a story: which family is active, when it "
+                           "peaks, and how the campaign progresses over time.")
+    except Exception:
+        pass
+
+    if len(flagged) == 0:
+        st.success("No alerts at the current threshold.")
+    else:
+        n_zd = int(flagged["zero_day_likely"].sum()) if "zero_day_likely" in flagged else 0
+        if n_zd:
+            st.markdown(
+                f"<span class='badge warn'>⚠ {n_zd} of {len(flagged)} alert "
+                f"windows: possible novel activity (outside known-attack "
+                f"manifold)</span>", unsafe_allow_html=True)
+
+        st.markdown('<div class="sec-title"><h3>First alert</h3></div>',
+                    unsafe_allow_html=True)
+        first = flagged.iloc[0]
+        rcls, rlab = risk_badge(first["risk_score"])
+        zdflag = bool(first.get("zero_day", {}).get("zero_day_likely")) if first.get("zero_day") else False
+        st.markdown(
+            f"<div class='alert-card fadeup'>"
+            f"<div class='row'><span class='who'>Window "
+            f"<span style='font-family:var(--mono)'>#{int(first['window_id'])}</span>"
+            f" · risk <span style='font-family:var(--mono)'>{first['risk_score']:.3f}</span></span>"
+            f"<span><span class='badge {rcls}'>{rlab}</span> "
+            f"<span class='badge info'>{html.escape(str(first['attack_family']))}</span>"
+            f"{' <span class=\'badge warn\'>novelty</span>' if zdflag else ''}</span></div>"
+            f"<div class='row' style='margin-top:8px'>"
+            f"<span>MITRE stage <span style='font-family:var(--mono)'>{html.escape(str(first['mitre_stage']))}</span></span>"
+            f"<span style='color:var(--dim)'>ground truth: {html.escape(str(first.get('gt_family','—'))) if first.get('gt_family') else '—'}</span>"
+            f"</div></div>", unsafe_allow_html=True)
+
+        zd = first.get("zero_day")
+        if zd:
+            st.markdown(
+                f"**Zero-day callout:** {zd.get('family_confidence')} conf · "
+                f"novelty distance `{zd.get('novelty_dist')}` "
+                f"(pctl `{zd.get('novelty_pctl')}`)")
+
+        meta = family_meta(first["attack_family"])
+        with st.expander("ATT&CK / CAPEC / CVE enrichment"):
+            st.markdown(f"**{meta['description']}**\n\n"
+                        f"- **Stage:** `{first['mitre_stage']}`\n"
+                        f"- **CAPEC:** {capec_chain(first['attack_family'])}\n"
+                        f"- **Known CVEs (illustrative):** "
+                        f"{', '.join(meta['cves']) if meta['cves'] else '-'}")
+
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            if "mitre_stage" in flagged:
+                st.markdown('<div class="sec-title"><h3>MITRE stage breakdown</h3></div>',
+                            unsafe_allow_html=True)
+                stages = Counter(flagged["mitre_stage"])
+                sdf = pd.DataFrame(stages.items(), columns=["stage", "count"])
+                st.altair_chart(
+                    alt.Chart(sdf).mark_bar(cornerRadiusEnd=4).encode(
+                        x=alt.X("stage:N", sort="-y", title=None),
+                        y=alt.Y("count:Q", title="alert windows"),
+                        color=alt.Color("stage:N", legend=None,
+                                        scale=alt.Scale(range=["#60a5fa", "#818cf8",
+                                                              "#a78bfa", "#c084fc",
+                                                              "#38bdf8"])),
+                        tooltip=["stage:N", "count:Q"]).properties(height=240),
+                    width="stretch")
+        with cc2:
+            if "attack_family" in flagged:
+                st.markdown('<div class="sec-title"><h3>Attack families</h3></div>',
+                            unsafe_allow_html=True)
+                fcount = flagged["attack_family"].value_counts().reset_index()
+                fcount.columns = ["family", "count"]
+                st.altair_chart(
+                    alt.Chart(fcount).mark_arc(innerRadius=46).encode(
+                        theta=alt.Theta("count:Q"),
+                        color=alt.Color("family:N", legend=alt.Legend(symbolType="circle"),
+                                        scale=alt.Scale(domain=list(fcount["family"]),
+                                                        range=[fam_color(f) for f in fcount["family"]])),
+                        tooltip=["family:N", "count:Q"]).properties(height=240),
+                    width="stretch")
+
+        st.markdown('<div class="sec-title"><h3>Alert feed</h3></div>',
+                    unsafe_allow_html=True)
+        n_show = st.selectbox(
+            "Show", [10, 25, 50, len(flagged)],
+            index=1,
+            format_func=lambda n: ("All" if n >= len(flagged)
+                                   else f"First {n}"),
+            key="feed_limit")
+        shown_cnt = n_show if n_show < len(flagged) else len(flagged)
+        st.caption(f"Showing **{shown_cnt} of {len(flagged)}** alert windows.")
+        for _, row in flagged.head(shown_cnt).iterrows():
+            rcls, rlab = risk_badge(row["risk_score"])
+            zd_b = bool(row.get("zero_day", {}).get("zero_day_likely")) if row.get("zero_day") else False
+            attr = row.get("attribution") or {}
+            drivers = ", ".join(f"{k}" for k, _ in list(attr.items())[:4]) if attr else ""
+            st.markdown(
+                f"<div class='alert-card fadeup'><div class='row'>"
+                f"<span class='who'>#{int(row['window_id'])}</span>"
+                f"<span style='font-family:var(--mono);font-weight:700'>{row['risk_score']:.3f}</span>"
+                f"<span class='badge {rcls}'>{rlab}</span>"
+                f"<span class='badge info'>{html.escape(str(row['attack_family']))}</span>"
+                f"<span style='font-family:var(--mono);font-size:.78rem;color:var(--dim)'>{html.escape(str(row['mitre_stage']))}</span>"
+                f"{'<span class=\'badge warn\'>novelty</span>' if zd_b else ''}"
+                f"</div>"
+                f"{'<div style=\'margin-top:6px;color:var(--muted);font-size:.78rem\'>drivers: ' + ' · '.join(html.escape(k) for k in drivers.split(', ')) if drivers else ''}</div></div>",
+                unsafe_allow_html=True)
+        if len(flagged) > shown_cnt:
+            st.caption(f"…and {len(flagged) - shown_cnt} more alerts — switch to "
+                       "What-If / Explainability for per-window depth, or raise "
+                       "the limit above for the full set.")
+        with st.expander("Full alerts table"):
+            shown = flagged.copy()
+            if "attribution" in shown:
+                shown["drivers"] = shown["attribution"].apply(
+                    lambda a: ", ".join(f"{k}: {v:.3g}" for k, v in (a or {}).items()))
+            show_cols = [c for c in ["window_id", "risk_score", "attack_family",
+                                     "mitre_stage", "gt_family", "drivers"]
+                         if c in shown.columns]
+            st.dataframe(shown[show_cols].set_index("window_id"),
+                         width="stretch", height=300)
+            if "zero_day_likely" in shown.columns:
+                st.caption("Zero-day callout marks alert windows whose feature "
+                           "vector sits outside the known-attack manifold "
+                           "(>95th-percentile NN distance). Analyst review, not "
+                           "an automated verdict.")
+
+# ==========================================================================
+# TAB 2 — INVESTIGATION (explain + what-if)
+# ==========================================================================
+with tab2:
+    # ---- MODEL COMPARISON (RF vs LSTM) ----
+    rf_data = {
+        "Cross-day AUC": (full.get("roc_auc"), "g"),
+        "Precision": (full.get("precision"), "g"),
+        "Recall": (full.get("recall"), "r"),
+        "F1": (full.get("f1"), "o"),
+        "Lead (median)": (lt.get("median"), "b"),
+    }
+    lstm_data = {
+        "Next-state AUC": (world.get("lstm_next_attack_window_auc"), "v"),
+        "Walk-forward AUC": (wf.get("pooled_auc"), "o"),
+        "Forecast AUPRC": (evalf.get("auprc_forecast"), "b"),
+    }
+    try:
+        comp_cols = st.columns([1, 1], gap="large")
+        with comp_cols[0]:
+            st.markdown('<div class="sec-title"><h3>Model comparison</h3></div>',
+                        unsafe_allow_html=True)
+            comp_html = "<div style='display:grid; grid-template-columns:1fr 1fr; gap:10px'>"
+            for label, (val, cls) in rf_data.items():
+                v = f"{val:.3f}" if val is not None else "—"
+                comp_html += (
+                    f"<div class='metric-card' style='padding:10px 12px'>"
+                    f"<div style='font-size:.6rem; text-transform:uppercase; color:var(--dim); "
+                    f"letter-spacing:.08em'>{label}</div>"
+                    f"<div style='font-family:var(--mono); font-weight:800; font-size:1.05rem; "
+                    f"color:var(--{cls})'>{v}</div></div>")
+            comp_html += "</div>"
+            st.markdown(comp_html, unsafe_allow_html=True)
+            st.caption("RandomForest · 76-dim rolling · trained Mon–Thu, tested Fri")
+        with comp_cols[1]:
+            st.markdown('<div class="sec-title"><h3>LSTM world model</h3></div>',
+                        unsafe_allow_html=True)
+            lstm_html = "<div style='display:grid; grid-template-columns:1fr 1fr; gap:10px'>"
+            for label, (val, cls) in lstm_data.items():
+                v = f"{val:.3f}" if val is not None else "—"
+                lstm_html += (
+                    f"<div class='metric-card' style='padding:10px 12px'>"
+                    f"<div style='font-size:.6rem; text-transform:uppercase; color:var(--dim); "
+                    f"letter-spacing:.08em'>{label}</div>"
+                    f"<div style='font-family:var(--mono); font-weight:800; font-size:1.05rem; "
+                    f"color:var(--{cls})'>{v}</div></div>")
+            lstm_html += "</div>"
+            st.markdown(lstm_html, unsafe_allow_html=True)
+            st.caption("LSTM · learns state-transition P(S_t+1 | S_t) · never auto-blocks")
+    except Exception:
+        pass
+
+    st.markdown("---")
+
+    # ---- FAMILY-LEVEL BREAKDOWN ----
+    pf = evalf.get("per_family", {})
+    if pf:
+        try:
+            st.markdown('<div class="sec-title"><h3>Per-family detection rate</h3></div>',
+                        unsafe_allow_html=True)
+            rows = []
+            for fam, d in pf.items():
+                rows.append({
+                    "family": fam,
+                    "total": d.get("windows", 0),
+                    "warned": d.get("warned_within_horizon", 0),
+                    "lead": d.get("median_lead_windows", 0),
+                    "rate": (d.get("warned_within_horizon", 0) / d.get("windows", 1)
+                             if d.get("windows") else 0),
+                })
+            fam_df = pd.DataFrame(rows)
+            fam_chart = alt.Chart(fam_df).mark_bar(cornerRadiusEnd=4).encode(
+                x=alt.X("family:N", title=None),
+                y=alt.Y("rate:Q", title="detection rate", scale=alt.Scale(domain=[0, 1])),
+                color=alt.Color("family:N", legend=None,
+                                scale=alt.Scale(domain=fam_df["family"].tolist(),
+                                                range=["#f87171", "#60a5fa", "#4ade80"])),
+                tooltip=["family:N",
+                         alt.Tooltip("warned:Q", title="warned"),
+                         alt.Tooltip("total:Q", title="total"),
+                         alt.Tooltip("lead:Q", title="lead (median w)")],
+            ).properties(height=220)
+            st.altair_chart(fam_chart, width="stretch")
+            st.caption("DDoS warned 269/278 · Botnet 16/92 · PortScan 0/351 (cross-day blind spot)")
+        except Exception:
+            pass
+
+    st.markdown("---")
+
+    # ---- PER-WINDOW ATTRIBUTION ----
+    st.markdown('<div class="sec-title"><h3>Real per-window feature attribution</h3></div>',
+                unsafe_allow_html=True)
+    is_lstm = model_name == "LSTM"
+    if is_lstm:
+        st.info("**Engine = LSTM.** Gradient **saliency** over the 12-step input "
+                "sequence: each number is the absolute mean gradient (normalized "
+                "to sum ≈ 1) — **how much** that traffic feature influenced the "
+                "network-state prediction. Larger = higher influence.")
+    else:
+        st.info("**Engine = RandomForest.** **Mean-imputation ablation**: risk is "
+                "re-run with each top feature fixed to its batch mean; the change "
+                "in risk is that feature's contribution. Red = pushes risk up · "
+                "green = pulls it down. This is the model's own reasoning.")
+    if len(flagged) == 0:
+        st.info("No alert windows to explain at the current threshold.")
+    else:
+        opts = flagged["window_id"].astype(int).tolist()
+        probe = st.session_state.get("cmd_invest")
+        idx = opts.index(probe) if probe in opts else 0
+        sel = st.selectbox("Alert window to explain", opts, index=idx,
+                           help="Pre-selected from the Command threat queue "
+                                "when you pick a window up top.")
+        row = flagged[flagged["window_id"].astype(int) == sel].iloc[0]
+        rcls, rlab = risk_badge(row["risk_score"])
+        st.markdown(
+            f"<div class='alert-card'><div class='row'>"
+            f"<span>Window <span style='font-family:var(--mono)'>#{int(sel)}</span></span>"
+            f"<span class='badge {rcls}'>{rlab}</span>"
+            f"<span class='badge info'>{html.escape(str(row['attack_family']))}</span>"
+            f"<span style='font-family:var(--mono);font-size:.78rem;color:var(--dim)'>{html.escape(str(row['mitre_stage']))}</span>"
+            f"</div></div>", unsafe_allow_html=True)
+        attr = row.get("attribution") or {}
+        if attr:
+            contrib = pd.DataFrame(
+                [{"feature": k, "contribution": v} for k, v in attr.items()])
+            contrib = contrib.reindex(
+                contrib["contribution"].abs().sort_values(
+                    ascending=False).index)
+            top10 = contrib.head(10)
+            st.markdown("**Top drivers**")
+            chips = "".join(
+                f"<span class='chip {'r' if c > 0 else 'o'}'>{html.escape(f)} "
+                f"{c:+.3f}</span>" for f, c in zip(top10["feature"], top10["contribution"]))
+            st.markdown(f"<div>{chips}</div>", unsafe_allow_html=True)
+            if is_lstm:
+                bar = alt.Chart(top10).mark_bar(cornerRadiusEnd=3).encode(
+                    x=alt.X("contribution:Q", title="saliency (gradient magnitude)"),
+                    y=alt.Y("feature:N", sort="-x"),
+                    color=alt.value("#a78bfa"),
+                    tooltip=["feature:N", alt.Tooltip("contribution:Q", format=".4f")],
+                ).properties(height=300)
+                st.altair_chart(bar, width="stretch")
+                st.caption("Violet bars = normalized gradient saliency · "
+                           "higher = more influence on the LSTM state prediction")
+            else:
+                bar = alt.Chart(top10).mark_bar(cornerRadiusEnd=3).encode(
+                    x=alt.X("contribution:Q", title="contribution "
+                            "(risk drop on mean-imputation)"),
+                    y=alt.Y("feature:N", sort="-x"),
+                    color=alt.condition(alt.datum.contribution < 0,
+                                        alt.value("#22c55e"),
+                                        alt.value("#ef4444")),
+                    tooltip=["feature:N", alt.Tooltip("contribution:Q", format=".4f")],
+                ).properties(height=300)
+                st.altair_chart(bar, width="stretch")
+                st.caption("Red = pushes risk up · green = pulls it down")
+        else:
+            st.info("No attribution produced for this window (LSTM saliency is "
+                    "emitted only for forecast-positive windows).")
+        meta = family_meta(row["attack_family"])
+        st.markdown(
+            f"<div class='metric-card'><b>Human-readable diagnosis</b><br>"
+            f"<span style='color:var(--muted)'>{html.escape(meta['description'])}</span></div>",
+            unsafe_allow_html=True)
+        if row.get("zero_day", {}).get("zero_day_likely"):
+            st.warning("This window is flagged **possible novel / zero-day** — "
+                       "it sits outside the known-attack feature manifold.")
+
+    st.markdown("---")
+    st.markdown('<div class="sec-title"><h3>Counterfactual what-if on real features</h3></div>',
+                unsafe_allow_html=True)
+    st.markdown("Pick an alert window, perturb its **real raw traffic features**, "
+                "and re-run the model to see whether the change would suppress "
+                "the alert. Demonstrates how the forecaster responds to "
+                "mitigation (rate-limiting, blocking a scanner, changing flow mix).")
+    if len(flagged) == 0:
+        st.info("No alert windows available to perturb at the current threshold.")
+    else:
+        sel3 = st.selectbox("Alert window to perturb",
+                            flagged["window_id"].astype(int).tolist(), index=0,
+                            key="whatif_window")
+        prow = flagged[flagged["window_id"].astype(int) == sel3].iloc[0]
+        baseline_row = prow.get("row76")
+        feat = dict(prow.get("features") or {})
+        if not feat:
+            st.info("This window has no raw feature record for what-if tuning.")
+        else:
+            colL, colR = st.columns(2)
+            cur_risk = float(prow["risk_score"])
+            with colL:
+                st.markdown(
+                    f"<div class='metric-card'><span style='color:var(--dim);"
+                    f"font-size:.72rem;text-transform:uppercase;letter-spacing:.06em'>Baseline</span><br>"
+                    f"<span style='font-family:var(--mono);font-weight:800;font-size:2rem'>{cur_risk:.3f}</span><br>"
+                    f"<span class='badge {'crit' if cur_risk>=0.75 else 'high'}'>ALERT</span> "
+                    f"<span class='badge info'>{html.escape(str(prow['attack_family']))}</span>",
+                    unsafe_allow_html=True)
+                st.caption("Starting from the window's **real** 76-feature "
+                           "vector (`row76`).")
+            edited = {}
+            with st.expander("Adjust raw traffic features"):
+                cc = st.columns(2)
+                cols = list(feat.keys())
+                for i, c in enumerate(cols):
+                    base = float(feat[c])
+                    lo = float(min(base * 0.5, base))
+                    hi = float(max(base * 2.0, base + 1.0))
+                    with cc[i % 2]:
+                        edited[c] = st.slider(c.replace("_", " ").title(),
+                                              lo, hi, base, key=f"wi_{c}")
+                        st.caption(f"baseline `{base:.4g}`")
+            with colR:
+                st.markdown(
+                    f"<div class='metric-card'><span style='color:var(--dim);"
+                    f"font-size:.72rem;text-transform:uppercase;letter-spacing:.06em'>Result"
+                    f"</span></div>",
+                    unsafe_allow_html=True)
+                if st.button("▶ Run What-If", type="primary", width="stretch"):
+                    new_row = dict(baseline_row or {})
+                    for c in cols:
+                        if c in new_row:
+                            new_row[c] = float(edited[c])
+                    risk, alert, fam, stage, attr, zd = \
+                        engine.predict_batch([new_row], [edited])[0]
+                    delta = risk - cur_risk
+                    rcls, rlab = risk_badge(risk)
+                    if not alert:
+                        rcls, rlab = "safe", "SUPPRESSED"
+                    st.markdown(
+                        f"<div class='metric-card'><span style='font-family:var(--mono);"
+                        f"font-weight:800;font-size:2rem'>{risk:.3f}</span>&nbsp;"
+                        f"<span class='badge {rcls}'>{rlab}</span><br>"
+                        f"<span style='font-family:var(--mono);color:{'#f87171' if delta>0 else '#4ade80'}"
+                        f";font-weight:700'>{delta:+.3f}</span> Δ<br><br>"
+                        f"<span class='chip'>{html.escape(str(fam))}</span> "
+                        f"<span class='chip'>{html.escape(str(stage))}</span></div>",
+                        unsafe_allow_html=True)
+                    if not alert:
+                        st.success("The proposed mitigation would suppress "
+                                   "this alert below threshold.")
+                    else:
+                        st.warning("Risk changed but still above threshold — "
+                                   "combine with rate-limiting / blocking.")
+                else:
+                    st.markdown("Hit **Run What-If** to evaluate the edited "
+                                "features against the live model.")
+
+# ==========================================================================
+# TAB 3 — RESPONSE (SOAR active defense)
+# ==========================================================================
+with tab3:
+    st.markdown('<div class="sec-title"><h3>SOAR active-defense playbooks</h3></div>',
+                unsafe_allow_html=True)
+    st.markdown("Given the current alert we surface MITRE ATT&CK intel and "
+                "generate **ready-to-review** firewall rules. These are "
+                "suggestions for a human to approve — the tool never applies them "
+                "automatically.")
+    if len(flagged) == 0:
+        st.info("No active alert to build a playbook around.")
+    else:
+        sel4_opts = flagged.sort_values(
+            "risk_score", ascending=False)["window_id"].astype(int).tolist()
+        sel4 = st.selectbox("Alert to defend", sel4_opts,
+                            format_func=lambda w: f"Window #{int(w)}",
+                            index=0, key="defense_window")
+        row = flagged[flagged["window_id"].astype(int) == sel4].iloc[0]
+        fam = row["attack_family"]
+        src = "attacker.example"
+        try:
+            dport = int((row.get("features") or {}).get(
+                "unique_dst_ports", 0)) or 80
+        except Exception:
+            dport = 80
+        intel = defense.get_mitre_intel(fam)
+        scls, slab = sev_badge(intel["severity"])
+        cc1a, cc1b = st.columns(2)
+        with cc1a:
+            st.markdown(
+                f"<div class='metric-card'><b>MITRE ATT&CK</b><br>"
+                f"<span class='badge {scls}'>{slab}</span> "
+                f"<span class='badge info'>{html.escape(str(intel['technique_id']))}</span>"
+                f"<p style='margin:.6rem 0 0'><b>Tactic:</b> {html.escape(str(intel['tactic']))}<br>"
+                f"<b>Technique:</b> {html.escape(str(intel['technique_name']))}<br>"
+                f"<b>CVSS v3.1:</b> {intel['cvss_score']}<br>"
+                f"<b>Illustrative CVE:</b> <span style='font-family:var(--mono)'>{html.escape(str(intel['cve_example']))}</span></p>"
+                f"<p style='margin:.6rem 0 0'><span class='badge med'>ACTION</span><br>"
+                f"<span style='color:var(--muted)'>{html.escape(str(intel['recommended_action']))}</span></p></div>",
+                unsafe_allow_html=True)
+        with cc1b:
+            st.markdown(
+                f"<div class='metric-card'><b>Playbook for window "
+                f"<span style='font-family:var(--mono)'>#{int(row['window_id'])}</span></b><br>"
+                f"<span class='chip'>{html.escape(str(fam))}</span> "
+                f"<span class='chip'>{html.escape(str(row['mitre_stage']))}</span>"
+                f"<p style='margin:.6rem 0 0;color:var(--muted)'>Rule source IPs "
+                f"are shown generically — the model surfaces features, not "
+                f"captured addresses.</p></div>", unsafe_allow_html=True)
+        st.markdown('<div class="sec-title"><h3>Suggested firewall rules</h3></div>',
+                    unsafe_allow_html=True)
+        rules = defense.generate_firewall_rules(src, dport, fam)
+        rc1, rc2, rc3 = st.columns(3)
+        with rc1:
+            st.code(rules["iptables"], language="bash")
+        with rc2:
+            st.code(rules["windows_netsh"], language="bat")
+        with rc3:
+            st.code(rules["cisco_acl"], language="text")
+
+        # ---- SOAR: course-of-action blast-radius + auto-approve simulation ----
+        import random as _rnd
+        _rnd.seed(int(row["window_id"]))
+        blast = {
+            "DDoS": {"scope": "Edge / egress gateways", "ports": ["443", "80", "53"],
+                     "hosts": 24, "availability": "High"},
+            "PortScan": {"scope": "DMZ / perimeter hosts", "ports": ["1-1024"],
+                         "hosts": 61, "availability": "Low"},
+            "Botnet": {"scope": "Compromised endpoints", "ports": ["4444", "6667"],
+                       "hosts": 17, "availability": "Medium"},
+            "C&C": {"scope": "Command routing path", "ports": ["443", "53"],
+                    "hosts": 9, "availability": "Medium"},
+        }.get(str(fam), {"scope": "Internal segment", "ports": ["80", "443"],
+                         "hosts": 12, "availability": "Medium"})
+        st.markdown('<div class="sec-title"><h3>SOAR course of action — blast radius'
+                    ' &amp; auto-approve</h3></div>', unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='glass' style='padding:12px 18px;margin-bottom:10px'>"
+            f"<span class='chip r'>SCOPE</span> <b>{html.escape(blast['scope'])}</b>"
+            f" — <span class='chip'>~{blast['hosts']} hosts</span>"
+            f" <span class='chip'>ports {html.escape(', '.join(blast['ports']))}</span>"
+            f" <span class='chip'>availability risk: {blast['availability']}</span>"
+            f"</div>", unsafe_allow_html=True)
+        coa_c1, coa_c2 = st.columns(2)
+        with coa_c1:
+            auto_mode = st.toggle(
+                "Auto-approve containment (SOAR autonomous mode)", value=False,
+                key="soar_auto",
+                help="When ON, the playbook is enforced with no human in the "
+                     "loop (simulation only — nothing is applied to a real network).")
+        with coa_c2:
+            coa_hosts = st.slider(
+                "Estimated asset blast radius (hosts)", 1, 200,
+                int(blast["hosts"]), key="coa_hosts")
+        if st.button("🚀 Run containment simulation", type="primary",
+                     key="run_contain"):
+            flow_to_action = {
+                "DDoS": "rate-limit + null-route edge",
+                "PortScan": "throttle scan sweep + block sweep range",
+                "Botnet": "quarantine compromised segment",
+                "C&C": "redirect egress beacon traffic to sinkhole",
+            }.get(str(fam), "block offending paths")
+            if auto_mode:
+                st.success(
+                    f"SOAR autonomous mode: **{flow_to_action}** applied to "
+                    f"**{coa_hosts}** hosts in <0.4s. NO human approval required "
+                    f"(simulation).")
+                steps = [
+                    ("0.0s", "Ingest alert (window #{})".format(int(row['window_id']))),
+                    ("0.2s", f"Classify family → **{fam}**"),
+                    ("0.4s", f"Enforce: {flow_to_action}"),
+                    ("0.6s", f"Decoy redirection armed for {coa_hosts} hosts"),
+                    ("1.0s", "Emit audit block to Merkle ledger"),
+                ]
+                for t, s in steps:
+                    st.markdown(f"<div class='feed-window'><span style='font-family:var(--mono);"
+                                f"color:#22d3ee'>{t}</span> {s}</div>",
+                                unsafe_allow_html=True)
+                st.caption("Autonomous enforcement is a simulation. In production "
+                           "you would gate this behind an approvals policy.")
+            else:
+                st.info(
+                    f"**Guardrail (human-in-the-loop):** proposed `{flow_to_action}` "
+                    f"for **{coa_hosts}** hosts. Clustered impact "
+                    f"~expected. **Awaiting analyst approval** — nothing enforced.")
+                st.markdown(
+                    f"<div class='feed-window'>⏳ Approval pending for playbook on "
+                    f"window <span style='font-family:var(--mono)'>#{int(row['window_id'])}</span>"
+                    f" ({fam}, ~{coa_hosts} hosts)</div>",
+                    unsafe_allow_html=True)
+
+        # ---- MITRE kill-chain position ----
+        kc_stages = ["Recon", "Weaponize", "Deliver", "Exploit",
+                     "C&C", "Actions", "Impact"]
+        cur_stage = str(row["mitre_stage"])
+        try:
+            cur_idx = next(i for i, s in enumerate(kc_stages)
+                           if s.lower()[:3] in cur_stage.lower() or
+                           cur_stage.lower()[:3] in s.lower())
+        except StopIteration:
+            cur_idx = None
+        kc_html = ("<div style='font-size:.72rem;letter-spacing:.1em;color:var(--dim);"
+                   "text-transform:uppercase;margin:6px 0 8px'>MITRE kill-chain "
+                   "position</div><div class='killchain'>")
+        for i, s in enumerate(kc_stages):
+            cls = "kn"
+            if cur_idx is not None:
+                if i < cur_idx: cls = "kn-done"
+                elif i == cur_idx: cls = "kn-cur"
+            kc_html += (f"<div class='{cls}'><span>{s}</span></div>"
+                        f"<div class='kchev'>{'›' if i < len(kc_stages)-1 else ''}</div>")
+        kc_html += "</div>"
+        if cur_idx is not None and cur_idx < len(kc_stages) - 1:
+            kc_html += (f"<div style='color:var(--muted);font-size:.78rem;margin-top:6px'>"
+                        f"Predicted next stage: <b style='color:#60a5fa'>"
+                        f"{kc_stages[cur_idx+1]}</b> — "
+                        f"{defense.get_mitre_intel(fam)['recommended_action']}</div>")
+        st.markdown(f"<div class='glass' style='padding:16px 20px;margin-top:8px'>{kc_html}</div>",
+                    unsafe_allow_html=True)
+        st.markdown('<div class="sec-title"><h3>Dynamic decoy honeypot</h3></div>',
+                    unsafe_allow_html=True)
+        if st.button("🪤 Trigger honeypot redirection demo", type="primary"):
+            trap = defense.simulate_honeypot_trap(src, dport)
+            st.success(
+                f"Simulated redirect of **{trap['attacker_ip']}** to sandbox "
+                f"session **{trap['sandbox_session_id']}** (decoy "
+                f":{trap['diverted_to_decoy_port']}).")
+            for log in trap["honeypot_log"]:
+                st.code(log, language="text")
+
+# ==========================================================================
+# TAB 4 — INTELLIGENCE (committed eval data + knowledge base only)
+# ==========================================================================
+with tab4:
+    st.markdown('<div class="sec-title"><h3>Threat intelligence</h3></div>',
+                unsafe_allow_html=True)
+    st.markdown("Cross-day threat picture assembled from committed evaluation "
+                "JSONs and the MITRE/CAPEC knowledge base — every number below "
+                "is real, nothing is simulated or inferred on the fly.")
+    pf = evalf.get("per_family", {})
+    if pf:
+        st.markdown('<div class="sec-title"><h4>Cross-day detection by family</h4></div>',
+                    unsafe_allow_html=True)
+        i_rows = []
+        for fam, d in pf.items():
+            i_rows.append({
+                "family": fam,
+                "windows": d.get("windows", 0),
+                "warned": d.get("warned_within_horizon", 0),
+                "lead (median w)": d.get("median_lead_windows", 0),
+                "detection rate": (d.get("warned_within_horizon", 0)
+                                   / d.get("windows", 1) if d.get("windows") else 0),
+            })
+        i_df = pd.DataFrame(i_rows)
+        try:
+            i_chart = alt.Chart(i_df).mark_bar(cornerRadiusEnd=4).encode(
+                x=alt.X("family:N", title=None),
+                y=alt.Y("detection rate:Q", scale=alt.Scale(domain=[0, 1]),
+                        title="warned within horizon"),
+                color=alt.Color("family:N", legend=None,
+                                scale=alt.Scale(domain=i_df["family"].tolist(),
+                                                range=["#f87171", "#60a5fa",
+                                                       "#4ade80"])),
+                tooltip=["family:N",
+                         alt.Tooltip("windows:Q", title="windows"),
+                         alt.Tooltip("warned:Q", title="warned"),
+                         alt.Tooltip("lead (median w):Q", title="lead (median w)")],
+            ).properties(height=200)
+            st.altair_chart(i_chart, width="stretch")
+        except Exception:
+            pass
+        st.dataframe(i_df.set_index("family"), width="stretch", height=140)
+        st.caption("DDoS 269/278 · Botnet 16/92 · PortScan 0/351 (cross-day "
+                   "blind spot — the honest argument for the novelty callout).")
+
+    curve = evalf.get("curve", [])
+    if curve:
+        st.markdown('<div class="sec-title"><h4>Operating points</h4></div>',
+                    unsafe_allow_html=True)
+        op_df = pd.DataFrame([{
+            "threshold": c.get("threshold"),
+            "precision": c.get("precision"),
+            "recall": c.get("recall"),
+            "F1": c.get("f1"),
+            "alerts": c.get("alerts"),
+        } for c in curve])
+        op_chart = alt.Chart(op_df).mark_line(point=True, strokeWidth=2).encode(
+            x=alt.X("threshold:Q", title="risk threshold"),
+            y=alt.Y("F1:Q", title="F1", scale=alt.Scale(domain=[0, 1])),
+            tooltip=[alt.Tooltip("threshold:Q", title="threshold"),
+                     alt.Tooltip("precision:Q", title="precision", format=".3f"),
+                     alt.Tooltip("recall:Q", title="recall", format=".3f"),
+                     alt.Tooltip("alerts:Q", title="alerts")],
+        ).properties(height=200)
+        st.altair_chart(op_chart, width="stretch")
+        st.caption("Precision/recall/F1 as the alert threshold moves — pick an "
+                   "operating point from the actual eval curve, not a guess.")
+
+    st.markdown('<div class="sec-title"><h4>MITRE / CAPEC knowledge</h4></div>',
+                unsafe_allow_html=True)
+    intel_fams = list(pf.keys()) if pf else []
+    if intel_fams:
+        ik_sel = st.selectbox("Family intel", intel_fams, key="intel_family")
+        try:
+            ik = defense.get_mitre_intel(ik_sel)
+            im = family_meta(ik_sel)
+            scls4, slab4 = sev_badge(ik["severity"])
+            st.markdown(
+                f"<div class='inv-head' style='border-left-color:{_cls_col(scls4)}'>"
+                f"<div style='flex:1'>"
+                f"<div class='tag'>MITRE ATT&CK · {html.escape(str(ik['tactic']))}</div>"
+                f"<div class='ttl'>{html.escape(str(ik['technique_name']))} "
+                f"<span class='badge {scls4}'>{slab4}</span> "
+                f"<span class='badge info'>{html.escape(str(ik['technique_id']))}</span></div>"
+                f"<div style='color:var(--muted);font-size:.8rem;margin-top:4px'>"
+                f"{html.escape(str(im['description']))}<br>"
+                f"{html.escape(str(ik['recommended_action']))}</div>"
+                f"</div><div style='text-align:right;font-family:var(--mono);font-size:.68rem;"
+                f"color:var(--dim);line-height:1.6'>CVSS {ik['cvss_score']}<br>"
+                f"CVE · {html.escape(str(ik['cve_example']))}<br>"
+                f"CAPEC · {html.escape(str(capec_chain(ik_sel)))}</div></div>",
+                unsafe_allow_html=True)
+        except Exception:
+            pass
+
+    st.markdown('<div class="sec-title"><h4>Global threat atlas</h4></div>',
+                unsafe_allow_html=True)
+    st.markdown(
+        "The interactive 3D threat globe lives on the **Home** page (lazy-loaded "
+        "three.js, simulated attack arcs, NASA night-lights texture with an "
+        "offline procedural fallback).")
+    try:
+        st.page_link("home.py", label="🌐 Open global threat atlas")
+    except Exception:
+        st.caption("Open the **Home** page from the sidebar to view the globe.")
+
+# ==========================================================================
+# TAB 5 — FORENSICS
+# ==========================================================================
+with tab5:
+    st.markdown('<div class="sec-title"><h3>Tamper-proof forensic audit ledger</h3></div>',
+                unsafe_allow_html=True)
+    st.markdown("Every incident is appended to an SHA-256 Merkle chain — each "
+                "block's hash depends on the previous block, so any tampering "
+                "breaks the chain. Verifiable chain of custody for compliance "
+                "and legal admissibility.")
+    f_p1, f_p2 = st.columns([1.25, 1])
+    with f_p1:
+        chain_html = "".join(
+            (f"<span class='chip'><b>{b['block_id']}</b> "
+             f"{b['event_type'][:12]} {b['block_hash'][:10]}</span>"
+             f"<span style='color:#3b82f6;padding:0 2px'>→</span>")
+            for b in ledger.chain)
+        st.markdown(f"<div class='metric-card'><b>Block chain</b><br>"
+                    f"<div style='margin-top:8px;overflow-x:auto;"
+                    f"white-space:nowrap;padding-bottom:6px'>{chain_html}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True)
+        if ledger.verify_integrity():
+            st.success("✅ Merkle chain integrity: **VALID** — no tampering detected")
+        else:
+            st.error("❌ INTEGRITY VIOLATION: ledger hash mismatch!")
+        try:
+            chain_df = pd.DataFrame(ledger.chain)[
+                ["block_id", "timestamp", "event_type", "block_hash"]]
+            st.dataframe(chain_df, width="stretch", height=200)
+        except Exception:
+            st.json(ledger.chain)
+    with f_p2:
+        st.subheader("Log the current alert + export report")
+        if len(flagged) == 0:
+            st.info("No active alert to record.")
+        else:
+            sel5_opts = flagged.sort_values(
+                "risk_score", ascending=False)["window_id"].astype(int).tolist()
+            sel5 = st.selectbox("Alert to record", sel5_opts,
+                                format_func=lambda w: f"Window #{int(w)}",
+                                index=0, key="forensic_window")
+            row = flagged[flagged["window_id"].astype(int) == sel5].iloc[0]
+            intel = defense.get_mitre_intel(row["attack_family"])
+            meta = family_meta(row["attack_family"])
+            scls, slab = sev_badge(intel["severity"])
+            attr = row.get("attribution") or {}
+            reasoning = meta["description"] + (". " + ", ".join(
+                f"{k} {v:+.3f}" for k, v in list(attr.items())[:5]) if attr else "")
+            incident = {
+                "attack_family": row["attack_family"],
+                "severity": intel["severity"],
+                "cvss_score": intel["cvss_score"],
+                "src_ip": "attacker.example",
+                "dst_ip": "target.example",
+                "dst_port": 80,
+                "window_id": int(row["window_id"]),
+                "risk_score": float(row["risk_score"]),
+                "mitre_tactic": intel["tactic"],
+                "mitre_id": intel["technique_id"],
+                "mitre_name": intel["technique_name"],
+                "cve_example": intel["cve_example"],
+                "forensic_reasoning": reasoning,
+                "recommended_action": intel["recommended_action"],
+                "iptables_cmd": defense.generate_firewall_rules(
+                    "attacker.example", 80, row["attack_family"])["iptables"],
+            }
+            st.markdown(
+                f"<div class='metric-card'>"
+                f"<span class='badge {scls}'>{slab}</span> "
+                f"<span class='chip'>{html.escape(str(row['attack_family']))}</span>"
+                f"<p style='margin:.6rem 0 0'>Window "
+                f"<span style='font-family:var(--mono)'>#{int(row['window_id'])}</span>"
+                f" · risk <span style='font-family:var(--mono)'>{row['risk_score']:.3f}</span>"
+                f" · MITRE <span style='font-family:var(--mono)'>{intel['technique_id']}</span></p></div>",
+                unsafe_allow_html=True)
+            if st.button("📄 Record incident + generate report", type="primary",
+                         width="stretch"):
+                block = ledger.record_incident(incident)
+                incident["block_hash"] = block["block_hash"]
+                pdf_path = generate_pdf_report(
+                    incident, "SOC_Incident_Report.pdf")
+                st.session_state["last_report"] = pdf_path
+                st.success(f"Recorded as block #{block['block_id']} "
+                           f"(SHA-256 {block['block_hash'][:16]}…)")
+            pdf_path = st.session_state.get("last_report")
+            if pdf_path and os.path.exists(pdf_path):
+                ext = pdf_path.rsplit(".", 1)[-1]
+                mime = "application/pdf" if ext == "pdf" else "text/plain"
+                with open(pdf_path, "rb") as fh:
+                    st.download_button(
+                        label="⬇ Download forensic report",
+                        data=fh.read(),
+                        file_name=os.path.basename(pdf_path),
+                        mime=mime,
+                        width="stretch")
+
+# ==========================================================================
+# TAB 6 — REPORTS
+# ==========================================================================
+with tab6:
+    st.markdown('<div class="sec-title"><h3>Reports &amp; export hub</h3></div>',
+                unsafe_allow_html=True)
+    st.markdown("Aggregate **every** export the tool produces in one place — "
+                "machine-readable JSON, human-readable Markdown, and the "
+                "tamper-proof forensic ledger — ready to hand to an SIEM, "
+                "ticketing system, or compliance team.")
+    r1, r2 = st.columns(2)
+    with r1:
+        # ---- overall snapshot (markdown) ----
+        snapshot_md = "\n".join([
+            "# NetSight — SOC Command Center Snapshot",
+            f"- **Model:** {model_name} · **Threshold:** {threshold:.2f} · **Source:** {src_label}",
+            f"- **Windows analyzed:** {len(tl)} · **Alert windows:** {len(flagged)} "
+            f"({100*len(flagged)/len(tl):.1f}%)",
+            f"- **Peak risk:** {tl['risk_score'].max() if len(tl) else '—':.3f}",
+            f"- **Correlated incidents:** {len(incidents)}",
+        ])
+        st.markdown('<div class="sec-title"><h4>Dashboard snapshot (Markdown)</h4></div>',
+                    unsafe_allow_html=True)
+        st.download_button("⬇ Snapshot (.md)", data=snapshot_md,
+                           file_name="netsight_snapshot.md", mime="text/markdown",
+                           key="dl_snapshot")
+        # ---- incident narrative (markdown) ----
+        if len(incidents):
+            md = ["# NetSight — Correlated Incident Report",
+                  f"**Model:** {model_name} · **Threshold:** {threshold:.2f} · "
+                  f"**Source:** {src_label}",
+                  f"**Total incidents:** {len(incidents)} · **Alert windows:** "
+                  f"{len(flagged)}", "",
+                  "| # | Priority | Window span | Duration (w) | ~Flows | "
+                  "Peak risk | Family | MITRE stage | Sev |",
+                  "|---|---------|-------------|--------------|--------|--------|-------|-------------|-----|"]
+            for i in incidents:
+                md.append(
+                    f"| {i['incident_id']} | {i.get('priority','?')} | "
+                    f"w{i['first_window']}–w{i['last_window']} | "
+                    f"{i['duration_windows']} | {i['estimated_flows']:,} | "
+                    f"{i['peak_risk']:.3f} | {i['family']} | {i['stage']} | "
+                    f"{i['severity']:.3f} |")
+            st.markdown('<div class="sec-title"><h4>Incident report (Markdown)</h4></div>',
+                        unsafe_allow_html=True)
+            st.download_button("⬇ Incident report (.md)",
+                               data="\n".join(md),
+                               file_name="netsight_incident_report.md",
+                               mime="text/markdown", key="dl_report_md_hub")
+        # ---- detection quality metrics (JSON/CSV) ----
+        det_metrics = st.session_state.get("det_metrics")
+        if det_metrics:
+            det_csv = "metric,value\n" + "\n".join(
+                f"{k},{v}" for k, v in det_metrics.items())
+            st.markdown('<div class="sec-title"><h4>Detection quality metrics (CSV)</h4></div>',
+                        unsafe_allow_html=True)
+            st.download_button("⬇ Metrics (.csv)", data=det_csv,
+                               file_name="netsight_detection_metrics.csv",
+                               mime="text/csv", key="dl_metrics_csv")
+    with r2:
+        # ---- incident timeline JSON ----
+        if "incident_export" in st.session_state:
+            st.markdown('<div class="sec-title"><h4>Incident timeline (JSON)</h4></div>',
+                        unsafe_allow_html=True)
+            st.download_button("⬇ Timeline (.json)",
+                               data=st.session_state["incident_export"],
+                               file_name="netsight_incident_timeline.json",
+                               mime="application/json", key="dl_timeline_json_hub")
+        # ---- forensic ledger export ----
+        try:
+            ledger_json = json.dumps([{k: b[k] for k in
+                                       ("block_id", "timestamp", "event_type",
+                                        "block_hash", "payload") if k in b}
+                                      for b in ledger.chain], indent=2,
+                                     default=str)
+            st.markdown('<div class="sec-title"><h4>Forensic ledger (JSON)</h4></div>',
+                        unsafe_allow_html=True)
+            st.download_button("⬇ Ledger (.json)", data=ledger_json,
+                               file_name="netsight_forensic_ledger.json",
+                               mime="application/json", key="dl_ledger_json_hub")
+        except Exception:
+            pass
+        # ---- model card ----
+        st.markdown('<div class="sec-title"><h4>Model card</h4></div>',
+                    unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='metric-card'><b>{model_name}</b><br>"
+            f"<span class='chip'>forecast AUPRC 0.877</span> "
+            f"<span class='chip'>next-state AUC 0.814</span> "
+            f"<span class='chip'>walk-fwd AUC 0.722</span>"
+            f"<p style='margin:.5rem 0 0;color:var(--muted)'>Purpose: forecast "
+            f"network-attack risk one window ahead and attribute the driving "
+            f"features (Ablation / LSTM saliency).</p></div>",
+            unsafe_allow_html=True)
+    st.markdown("<div style='border-top:1px dashed rgba(148,163,184,.15);"
+                "margin:14px 0'></div>", unsafe_allow_html=True)
+    st.caption("All exports are generated locally from the current analysis. "
+               "Ledger exports preserve the SHA-256 chain for tamper evidence.")
