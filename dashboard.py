@@ -204,14 +204,14 @@ lt = evalf.get("lead_time_windows") or {}
 
 # ============================ SIDEBAR ======================================
 with st.sidebar:
-    st.header("⚙️ Controls")
+    st.header("Controls")
     model_name = st.radio("Model", ["RandomForest", "LSTM"], horizontal=True)
     threshold = st.slider("Alert threshold (risk)", 0.0, 1.0, 0.5, 0.05)
     max_windows = st.number_input("Max windows (0 = whole file)",
                                   min_value=0, value=0, step=50)
     st.markdown("---")
     ingest = st.radio("Data source",
-                      ["Upload file", "Demo artifact", "🌐 Live Traffic Stream"],
+                      ["Upload file", "Demo artifact", "Live Traffic Stream"],
                       key="src_ingest", horizontal=False)
     if ingest != "Live Traffic Stream":
         # never leave orphan capture threads running in the background
@@ -224,7 +224,7 @@ with st.sidebar:
         chosen = st.selectbox("Pick a CICIDS2017 day-file", list(DEMO_CSVS),
                               key="src_demo")
         demo_file = DEMO_CSVS[chosen]
-    elif ingest == "🌐 Live Traffic Stream":
+    elif ingest == "Live Traffic Stream":
         from live_sniffer import list_interfaces
         ifs = list_interfaces()
         iface = st.selectbox("Interface", [i for i, _ in ifs],
@@ -253,7 +253,7 @@ with st.sidebar:
                     f"- **Features** = 76-dim rolling")
 
 # ============================ TITLE ========================================
-st.title("🛡 SOC Command Center")
+st.title("SOC Command Center")
 st.caption(
     "Forecasts **known attack progressions** up to 6 windows ahead · maps "
     "alerts to MITRE ATT&CK · explains every prediction · novelty callout for "
@@ -280,7 +280,7 @@ elif uploaded is not None:
     input_path = strip_path
 
 # ==================== LIVE TRAFFIC STREAMING ================================
-if ingest == "🌐 Live Traffic Stream":
+if ingest == "Live Traffic Stream":
 
     def _stop_live():
         s = st.session_state.pop("live_session", None)
@@ -334,7 +334,7 @@ if ingest == "🌐 Live Traffic Stream":
     lc1, lc2 = st.columns([2.4, 1])
     with lc1:
         st.markdown(
-            '<div class="sec-title"><h3>🌐 Live Traffic Stream</h3></div>',
+            '<div class="sec-title"><h3>Live Traffic Stream</h3></div>',
             unsafe_allow_html=True)
     with lc2:
         p1, p2 = st.columns([1.1, 1.6])
@@ -344,7 +344,7 @@ if ingest == "🌐 Live Traffic Stream":
                 f"{'REPLAY MODE' if is_replay else 'LIVE CAPTURE'}</span>",
                 unsafe_allow_html=True)
         with p2:
-            st.button("⛔ Stop live capture", width="stretch",
+            st.button("Stop live capture", width="stretch",
                       on_click=_stop_live)
 
     @st.fragment(run_every=1.5)
@@ -352,13 +352,13 @@ if ingest == "🌐 Live Traffic Stream":
         snap = sess.state.snapshot()
 
         if snap.get("error"):
-            st.error(f"❌ {snap['error']}\n\n"
+            st.error(f"{snap['error']}\n\n"
                      "Live interface capture needs packet-capture privileges "
                      "(run the app with `sudo`, or switch to **Replay demo "
                      "stream**) — the full pipeline below is otherwise live "
                      "and identical.")
         elif not snap.get("running") and snap["windows_total"] == 0:
-            st.info("🟢 **Listening** — capture is starting. Packets will "
+            st.info("**Listening** — capture is starting. Packets will "
                     "fill 500-packet windows and stream forecasts here in "
                     "real time.")
 
@@ -375,7 +375,7 @@ if ingest == "🌐 Live Traffic Stream":
             unsafe_allow_html=True)
         d2.metric("Packets", f"{snap['packets']:,}")
         d3.metric("Windows", snap["windows_total"])
-        d4.metric("⚠ Alerts", snap["alerts"])
+        d4.metric("Alerts", snap["alerts"])
         d5.metric("Peak risk", f"{snap['peak_risk']:.2f}")
 
         m1, m2 = st.columns(2)
@@ -467,7 +467,7 @@ if input_path is None:
           <div class="sub" style="margin:0 auto">Pick a data source in the
           sidebar or hit <b>Run Demo</b> to analyze the committed Friday DDoS
           sample (<b>452 windows · 358 alerts</b>) — the recommended showcase.
-          Or stream: <b>🌐 Live Traffic Stream</b> replays the demo at your own
+          Or stream: <b>Live Traffic Stream</b> replays the demo at your own
           rhythm without root.</div>
           <div class="hk" style="justify-content:center">
             <span class="chip">Flow CSV</span>
@@ -476,7 +476,7 @@ if input_path is None:
             <span class="chip">Demo artifact</span>
           </div>
         </div>""", unsafe_allow_html=True)
-        st.button("🚀 Run Friday DDoS Demo", type="primary",
+        st.button("Run Friday DDoS Demo", type="primary",
                   width="stretch", on_click=_launch_demo)
         st.caption("Or upload your own CSV / PCAP from the sidebar controls.")
     st.stop()
@@ -627,10 +627,10 @@ with cc2:
 
 invest_opts = flagged["window_id"].astype(int).tolist()
 if len(invest_opts):
-    st.selectbox("🔬 Open a threat window in INVESTIGATION", invest_opts,
+    st.selectbox("Open a threat window in INVESTIGATION", invest_opts,
                  format_func=lambda w: f"Window #{int(w)}",
                  index=0, key="cmd_invest")
-    st.caption("The chosen window is pre-selected in the 🔬 INVESTIGATION "
+    st.caption("The chosen window is pre-selected in the INVESTIGATION "
                "center below.")
 else:
     st.session_state.pop("cmd_invest", None)
@@ -796,7 +796,7 @@ try:
                 md.append("")
             report_md = "\n".join(md)
             st.download_button(
-                "📄 Export incident narrative report (Markdown)",
+                "Export incident narrative report (Markdown)",
                 data=report_md,
                 file_name="netsight_incident_report.md",
                 mime="text/markdown",
@@ -807,7 +807,7 @@ try:
             pass
 
         # ---- incident detail expander ----
-        with st.expander(f"🔎 Incident drill-down ({len(incidents)} incidents)"):
+        with st.expander(f"Incident drill-down ({len(incidents)} incidents)"):
             try:
                 # generate a SOC PDF forensic report for a chosen incident
                 pdf_opts = ["Incident #{} — {} ({} windows)".format(
@@ -816,7 +816,7 @@ try:
                 pdf_sel = st.selectbox("Generate SOC PDF report for", pdf_opts,
                                        index=0, key="incident_pdf_sel")
                 chosen_inc = incidents[int(pdf_sel.split("—")[0].replace("Incident #", "").strip()) - 1]
-                if st.button("📄 Generate forensic PDF report", key="incident_pdf_btn"):
+                if st.button("Generate forensic PDF report", key="incident_pdf_btn"):
                     alert_win = chosen_inc["first_window"]
                     prow = flagged[flagged["window_id"].astype(int) == alert_win]
                     if len(prow):
@@ -916,15 +916,15 @@ try:
 except Exception:
     pass
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "🔭 DETECTION", "🔬 INVESTIGATION", "⚡ RESPONSE",
-    "🌐 INTELLIGENCE", "📜 FORENSICS", "📦 REPORTS"])
+    "DETECTION", "INVESTIGATION", "RESPONSE",
+    "INTELLIGENCE", "FORENSICS", "REPORTS"])
 
 # ==========================================================================
 # TAB 1 — DETECTION (forecaster)
 # ==========================================================================
 with tab1:
     # ---- RF vs LSTM side-by-side comparison ----
-    with st.expander("⚖️ Compare engines (RandomForest vs LSTM) on this input"):
+    with st.expander("Compare engines (RandomForest vs LSTM) on this input"):
         st.markdown("Runs **both** engines on the first few windows of the "
                     "current input and compares how they agree. Sampling keeps "
                     "it fast — use it to see where a statistical forecaster "
@@ -932,7 +932,7 @@ with tab1:
         cmp_n = st.slider("Windows to compare", 50, 400, 200, step=50,
                           key="cmp_n", help="Larger = slower; smaller = faster")
         cmp_note = ""
-        if st.button("⚔️ Run engine comparison", type="secondary",
+        if st.button("Run engine comparison", type="secondary",
                      key="run_cmp"):
             try:
                 from infer import RandomForestEngine, LSTMEngine, run_inference as _ri
@@ -986,7 +986,7 @@ with tab1:
                 st.altair_chart(cmp_chart, width="stretch")
                 st.caption("Blue = RandomForest · Violet = LSTM. Where the lines "
                            "diverge, the two models disagree on risk — inspect "
-                           "attribution in 🔬 Explainability.")
+                           "attribution in Explainability.")
             except Exception as e:
                 st.error(f"Comparison failed on this input: {type(e).__name__}")
         else:
@@ -1109,7 +1109,7 @@ with tab1:
         n_zd = int(flagged["zero_day_likely"].sum()) if "zero_day_likely" in flagged else 0
         if n_zd:
             st.markdown(
-                f"<span class='badge warn'>⚠ {n_zd} of {len(flagged)} alert "
+                f"<span class='badge warn'>{n_zd} of {len(flagged)} alert "
                 f"windows: possible novel activity (outside known-attack "
                 f"manifold)</span>", unsafe_allow_html=True)
 
@@ -1441,7 +1441,7 @@ with tab2:
                     f"font-size:.72rem;text-transform:uppercase;letter-spacing:.06em'>Result"
                     f"</span></div>",
                     unsafe_allow_html=True)
-                if st.button("▶ Run What-If", type="primary", width="stretch"):
+                if st.button("Run What-If", type="primary", width="stretch"):
                     new_row = dict(baseline_row or {})
                     for c in cols:
                         if c in new_row:
@@ -1566,7 +1566,7 @@ with tab3:
             coa_hosts = st.slider(
                 "Estimated asset blast radius (hosts)", 1, 200,
                 int(blast["hosts"]), key="coa_hosts")
-        if st.button("🚀 Run containment simulation", type="primary",
+        if st.button("Run containment simulation", type="primary",
                      key="run_contain"):
             flow_to_action = {
                 "DDoS": "rate-limit + null-route edge",
@@ -1633,7 +1633,7 @@ with tab3:
                     unsafe_allow_html=True)
         st.markdown('<div class="sec-title"><h3>Dynamic decoy honeypot</h3></div>',
                     unsafe_allow_html=True)
-        if st.button("🪤 Trigger honeypot redirection demo", type="primary"):
+        if st.button("Trigger honeypot redirection demo", type="primary"):
             trap = defense.simulate_honeypot_trap(src, dport)
             st.success(
                 f"Simulated redirect of **{trap['attacker_ip']}** to sandbox "
@@ -1744,7 +1744,7 @@ with tab4:
         "three.js, simulated attack arcs, NASA night-lights texture with an "
         "offline procedural fallback).")
     try:
-        st.page_link("home.py", label="🌐 Open global threat atlas")
+        st.page_link("home.py", label="Open global threat atlas")
     except Exception:
         st.caption("Open the **Home** page from the sidebar to view the globe.")
 
@@ -1771,9 +1771,9 @@ with tab5:
                     f"</div>",
                     unsafe_allow_html=True)
         if ledger.verify_integrity():
-            st.success("✅ Merkle chain integrity: **VALID** — no tampering detected")
+            st.success("Merkle chain integrity: **VALID** — no tampering detected")
         else:
-            st.error("❌ INTEGRITY VIOLATION: ledger hash mismatch!")
+            st.error("INTEGRITY VIOLATION: ledger hash mismatch!")
         try:
             chain_df = pd.DataFrame(ledger.chain)[
                 ["block_id", "timestamp", "event_type", "block_hash"]]
@@ -1824,7 +1824,7 @@ with tab5:
                 f" · risk <span style='font-family:var(--mono)'>{row['risk_score']:.3f}</span>"
                 f" · MITRE <span style='font-family:var(--mono)'>{intel['technique_id']}</span></p></div>",
                 unsafe_allow_html=True)
-            if st.button("📄 Record incident + generate report", type="primary",
+            if st.button("Record incident + generate report", type="primary",
                          width="stretch"):
                 block = ledger.record_incident(incident)
                 incident["block_hash"] = block["block_hash"]
