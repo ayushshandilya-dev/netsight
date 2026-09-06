@@ -68,7 +68,7 @@ syn_only_rate, icmp_ratio, udp_ratio, retrans_ratio, distinct_src_ips`) are
 appended as extra columns in the output CSV for analyst context; the models
 only consume the 10 raw + 66 rolling = 76 columns.
 
-### 🌐 Live Traffic Stream (real-time interface capture)
+### Live Traffic Stream (real-time interface capture)
 ```
 live interface  → live_sniffer.py (Scapy sniff, 500-packet windows)
                 → SAME accumulator as packet_features.py → SAME 76-feature space
@@ -89,7 +89,7 @@ live interface  → live_sniffer.py (Scapy sniff, 500-packet windows)
   streams them at a configurable cadence, so the entire live-forecasting
   experience demoes on any machine with zero privileges — feature-identical to
   real capture. Recommended for judging.
-- Pick **🌐 Live Traffic Stream** under *Data source* in the SOC Command Center
+- Pick **Live Traffic Stream** under *Data source* in the SOC Command Center
   sidebar; select an interface (or the Replay toggle) and watch forecasts
   accumulate in real time.
 
@@ -337,7 +337,7 @@ incident PDF report (falls back to `.txt` when absent).
 | `mitre_stages_and_explainability.py` | MITRE stage remapping + saliency demo |
 | `infer.py` | Streaming live inference (CSV or pre-windowed CSV); snapshots the real `row76` vector on alert windows for What-If |
 | `packet_features.py` | PCAP → pre-windowed CSV via Scapy (packet-level path); shared window accumulator `ingest_packet`/`finalize_window` (also used live) |
-| `live_sniffer.py` | 🌐 Live Traffic Stream — Scapy interface capture + replay mode in background threads, thread-safe `LiveState` snapshots, live incident correlation |
+| `live_sniffer.py` | Live Traffic Stream — Scapy interface capture + replay mode in background threads, thread-safe `LiveState` snapshots, live incident correlation |
 | `active_defense.py` | SOAR tab: MITRE ATT&CK intel, generated firewall rules (iptables/netsh/Cisco ACL), honeypot DNAT simulation |
 | `forensics_report.py` | SHA-256 Merkle-chain ledger (tamper-detecting) + SOC incident PDF report (fpdf2) |
 | `app.py` | Multi-page entry point (`st.navigation`) → Home + SOC Command Center |
@@ -392,7 +392,7 @@ incident PDF report (falls back to `.txt` when absent).
 - [x] Direct PCAP upload in `app.py`
 - [x] Verified on synthetic capture (2020 pkts)
 
-### Phase 3b — 🌐 Live Traffic Stream ✅
+### Phase 3b — Live Traffic Stream ✅
 - [x] `live_sniffer.py` — Scapy interface capture in background threads
 - [x] Shared window accumulator (`packet_features.ingest_packet/finalize_window`) → windows bit-identical to file path
 - [x] **Replay mode** (no root): streams committed demo windows at a configurable cadence
