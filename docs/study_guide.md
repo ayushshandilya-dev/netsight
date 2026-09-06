@@ -20,7 +20,7 @@
 10. [Explainability](#10-explainability)
 11. [Novelty / "zero-day" callout](#11-novelty-callout)
 12. [Packet-level path (PCAP)](#12-packet-level-path)
-12a. [🌐 Live Traffic Stream](#12a-live-traffic-stream-real-time-interface-capture)
+12a. [Live Traffic Stream](#12a-live-traffic-stream-real-time-interface-capture)
 13. [Live ↔ offline parity](#13-live--offline-parity)
 13a. [SOC workflow features (incident correlation, SOAR, reports)](#13a-soc-workflow-features-incident-correlation-soar-reports)
 14. [Key numbers to memorise](#14-key-numbers)
@@ -96,7 +96,7 @@ RUN TIME (offline, any machine):
 ### Ingestion paths
 - **CSV**: processed directly by `infer.py`'s `RollingFeatureBuilder` — no Scapy needed
 - **PCAP**: Scapy streams the PCAP → `packet_features.py` derives the same 10 raw features + 11 informational extras → outputs a pre-windowed CSV → fed into `infer.py` unchanged
-- **🌐 Live Traffic Stream**: `live_sniffer.py` captures packets straight off a network interface (Scapy `sniff`) in background threads, reusing the packet path's window accumulator so live windows are **bit-identical** to file-driven ones. Two modes: **sniff** (real capture, needs root) and **replay** (streams the committed demo windows at a configurable cadence — no root, feature-identical; recommended for judging). The SOC Command Center shows a live, auto-refreshing panel with a **LIVE CAPTURE / REPLAY MODE** pill and a capture-stop control.
+- **Live Traffic Stream**: `live_sniffer.py` captures packets straight off a network interface (Scapy `sniff`) in background threads, reusing the packet path's window accumulator so live windows are **bit-identical** to file-driven ones. Two modes: **sniff** (real capture, needs root) and **replay** (streams the committed demo windows at a configurable cadence — no root, feature-identical; recommended for judging). The SOC Command Center shows a live, auto-refreshing panel with a **LIVE CAPTURE / REPLAY MODE** pill and a capture-stop control.
 - **Both paths see the same 76 features** the models were trained on
 
 ### Components
@@ -109,7 +109,7 @@ RUN TIME (offline, any machine):
 | `logreg_baseline.py` | Mandated logistic-regression baseline |
 | `infer.py` | Streaming live inference (CSV or pre-windowed CSV); `correlate_incidents()` |
 | `packet_features.py` | PCAP → pre-windowed CSV via Scapy; shared `ingest_packet`/`finalize_window` accumulator (also used live) |
-| `live_sniffer.py` | 🌐 Live Traffic Stream — interface capture (sniff) + replay mode, background threads, thread-safe `LiveState` snapshots |
+| `live_sniffer.py` | Live Traffic Stream — interface capture (sniff) + replay mode, background threads, thread-safe `LiveState` snapshots |
 | `app.py` | Streamlit entry point (`st.navigation`) → Home + SOC Command Center |
 | `home.py` | Home page: offline threat-arc globe (three.js inlined; 2D canvas fallback, lazy-load via button) + eval stats + pipeline diagram |
 | `dashboard.py` | SOC Command Center: Command overview (telemetry, network map, threat/incident queues, event workflow) + 6 centers: DETECTION / INVESTIGATION (explain + what-if) / RESPONSE (SOAR) / INTELLIGENCE / FORENSICS / REPORTS |
@@ -408,7 +408,7 @@ Not yet validated on a real CICIDS2017 PCAP (synthetic only).
 
 ---
 
-## 12a. 🌐 Live Traffic Stream (real-time interface capture)
+## 12a. Live Traffic Stream (real-time interface capture)
 
 ### What it does
 `live_sniffer.py` captures packets **straight off a live network interface**
@@ -615,7 +615,7 @@ inlined; 2D canvas fallback when WebGL is unavailable — lazy-loaded via the
    (ships pre-featurized; no download). Pick the RF model, threshold 0.3.
 
 3a. **Live Traffic Stream (optional, 15s)**: "Now the same pipeline running
-   live": set *Data source* → **🌐 Live Traffic Stream**, leave **Replay demo
+   live": set *Data source* → **Live Traffic Stream**, leave **Replay demo
    stream** ON (works without root), and watch the auto-refreshing panel stream
    windows, risk, alerts and live incidents in real time.
 
