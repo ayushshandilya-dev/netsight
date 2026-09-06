@@ -89,7 +89,7 @@ direct mechanism.
   SOC Command Center, one-click **Run Demo**, incident correlation + attack-narrative
   Gantt, **RF-vs-LSTM side-by-side**, per-incident forensic PDF, and a
   **Reports & Export Hub** — everything a decision-support loop needs.
-- **🌐 Live Traffic Stream**: captures packets straight off a network interface
+- **Live Traffic Stream**: captures packets straight off a network interface
   (Scapy) into the *same* 500-packet windows as the file path — a live window
   is bit-identical to a stored one — streamed to the dashboard in real time
   (with a no-root **replay** mode so the demo runs on any machine).
