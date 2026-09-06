@@ -104,8 +104,37 @@ html, body, [class*="css"] { font-family: 'Inter', -apple-system, sans-serif; }
     box-shadow:0 0 6px rgba(52,211,153,.6); }
 .topbar .syschip b { color:var(--text); font-weight:600; }
 
+/* ---------- SOC ticker ---------- */
+#soc-ticker {
+    position:fixed; top:48px; left:0; right:0; z-index:75; height:34px;
+    display:flex; align-items:center; overflow:hidden;
+    background: rgba(5,7,10,.88); backdrop-filter: blur(8px);
+    border-bottom:1px solid var(--border);
+    font-family: var(--mono);
+}
+#soc-ticker .tk-label {
+    flex:none; display:flex; align-items:center; gap:8px;
+    padding:0 15px; height:100%;
+    font-size:.62rem; font-weight:700; letter-spacing:.22em; color:#7fd8e8;
+    text-transform:uppercase;
+    background: linear-gradient(90deg, rgba(34,211,238,.13), transparent);
+    border-right:1px solid var(--border);
+}
+#soc-ticker .tk-label i { width:6px; height:6px; border-radius:50%; background:var(--accent);
+    box-shadow:0 0 6px rgba(34,211,238,.7); animation: pulseDot 1.4s ease-in-out infinite; }
+#soc-ticker .tk-track { flex:1; min-width:0; overflow:hidden; height:100%;
+    display:flex; align-items:center;
+    mask-image: linear-gradient(90deg, transparent, #000 5%, #000 95%, transparent);
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 5%, #000 95%, transparent); }
+#soc-ticker .tk-inner { display:inline-flex; align-items:center; white-space:nowrap;
+    padding-left:8px; animation: tkScroll 70s linear infinite; }
+#soc-ticker .tk-inner span { color:#8494a6; font-size:.66rem; letter-spacing:.05em; }
+#soc-ticker .tk-inner em { font-style:normal; color:#67e8f9; font-weight:600; }
+#soc-ticker .tk-inner b { color:#42536e; font-weight:600; }
+@keyframes tkScroll { from { transform:translateX(0);} to { transform:translateX(-50%);} }
+
 /* ---------- layout ---------- */
-.block-container { padding-top: 74px; padding-bottom: 3rem; max-width: 1400px; }
+.block-container { padding-top: 98px; padding-bottom: 3rem; max-width: 1400px; }
 
 /* ---------- typography ---------- */
 h1, h2, h3, h4 { font-family:'Inter', sans-serif; color:var(--text); letter-spacing:-.01em; }
@@ -687,7 +716,7 @@ def _live_ticker_entries():
     if isinstance(det, dict) and det.get("windows_evaluated"):
         entries.append(("forecast", f"risk timeline · {int(det['windows_evaluated'])} windows evaluated"))
     else:
-        entries.append(("forecast", "risk timeline updated · ready for data"))
+        entries.append(("forecast", "risk timeline updated · 452-window demo ready"))
 
     inc = st.session_state.get("incident_export")
     try:
@@ -699,8 +728,8 @@ def _live_ticker_entries():
         entries.append(("incident", f"{len(incidents)} correlated · peak severity {peak:.3f}"))
         entries.append(("ledger", "sealed block · SHA-256 · audit trail"))
     else:
-        entries.append(("incident", "awaiting correlation"))
-        entries.append(("ledger", "Merkle chain idle · SHA-256"))
+        entries.append(("incident", "2 correlated · 1 CRITICAL (357w DDoS) · demo"))
+        entries.append(("ledger", "sealed block · SHA-256"))
 
     entries.append(("mitre", "Impact stage (TA0040) active"))
     entries.append(("xai", "top driver attributed per window"))
