@@ -460,17 +460,17 @@ with st.sidebar:
         "<div class='sb-t'><b>NETSIGHT</b><i>SIH · 26153</i></div></div>",
         unsafe_allow_html=True)
     st.markdown("---")
-    st.markdown("**🚀 Quick launch**")
+    st.markdown("**Quick launch**")
     if st.button("Open SOC Command Center",
                type="primary", width="stretch",
                key="open_dash"):
         st.switch_page("dashboard.py")
     st.markdown("---")
-    st.markdown("**⚙️ Mode**")
+    st.markdown("**Mode**")
     st.radio("Engine", ["RandomForest", "LSTM"],
              help="Command center default — switch anytime in SOC Command Center.")
     st.markdown("---")
-    st.markdown("**📡 Live status**")
+    st.markdown("**Live status**")
     st.markdown(
         f"""<div class="sb-status">
   <div class="sb-row"><span class="k">Engine</span><span class="v c">RF · 76-dim</span></div>
@@ -488,10 +488,7 @@ with hc1:
     st.markdown("""
     <div class="hero anim-in">
       <div class="glass-inner">
-        <div class="hero-meta">
-          <span class="sys">Cyber Defence OS · <b>SIH 26153</b> · <b>build 1.0</b></span>
-          <span class="status"><i></i>System nominal</span>
-        </div>
+        <div class="hero-meta"><span class="sys">Cyber Defence OS · <b>SIH 26153</b></span></div>
         <div class="kicker">AI-based network attack forecasting</div>
         <h1>Net<span class="cy">Sight</span></h1>
         <div class="sub">
@@ -503,7 +500,6 @@ with hc1:
           windows, or a PCAP.
         </div>
         <div class="hk">
-          <span class="hlab">capabilities</span>
           <span class="chip"><i></i>Forecast</span>
           <span class="chip"><i></i>Explain</span>
           <span class="chip"><i></i>Respond</span>
@@ -523,7 +519,7 @@ with hc1:
         (_metro(lead_med, "lead time · median w", "b") if lead_med else "") +
         "</div>",
         unsafe_allow_html=True)
-    if st.button("⚡ Enter command center", type="primary",
+    if st.button("Enter command center", type="primary",
                  width="content", key="open_cmd_center"):
         st.switch_page("dashboard.py")
 
@@ -545,15 +541,9 @@ with hc2:
             "<div style='display:flex;flex-direction:column;align-items:center;padding:2px 0 0'>"
             "<div class='radar'>"
             "<div class='ring r1'></div><div class='ring r2'></div><div class='ring r3'></div>"
-            "<div class='blip' style='left:30%;top:26%;color:#f87171'></div>"
-            "<div class='blip' style='left:64%;top:56%;color:#67e8f9'></div>"
-            "<div class='blip' style='left:44%;top:74%;color:#a78bfa'></div>"
-            "<div class='blip' style='left:70%;top:24%;color:#fdba74'></div>"
-            "<div class='hub'></div></div>"
-            "<div style='font-size:.62rem;font-family:var(--mono);color:var(--muted);"
-            "letter-spacing:.16em'>THREAT-ARC SCAN · STANDBY</div></div>",
+            "<div class='hub'></div></div></div>",
             unsafe_allow_html=True)
-        if st.button("🌐 Load globe", type="secondary",
+        if st.button("Load globe", type="secondary",
                      width="stretch", key="load_globe"):
             st.session_state["_globe_loaded"] = True
             st.rerun()
@@ -563,15 +553,12 @@ with hc2:
         f"<span class='chip'>lead {lead_med if lead_med else '8'} w · median</span>"
         "<span class='chip'>3 attack families cross-day</span>"
         "<span class='chip'>76-dim rolling windows</span>"
-        "</div>"
-        "<div style='margin-top:8px;font-size:.62rem;color:var(--dim);"
-        "font-family:var(--mono);letter-spacing:.06em'>EARTH TEXTURE · NASA NIGHT-LIGHTS · "
-        "PROCEDURAL FALLBACK OFFLINE</div>",
+        "</div>",
         unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 if meta:
-    st.caption(f"📊 {meta} · All figures read from committed evaluation JSONs.")
+    st.caption(f"{meta} · All figures read from committed evaluation JSONs.")
 
 # --- pipeline ---------------------------------------------------------------
 st.markdown(
@@ -586,38 +573,28 @@ st.markdown("""
 
   <div class="pipe-node anim-in d1">
     <div class="stage">01</div>
-    <div class="ico">📥</div>
     <div class="name">Ingest</div>
     <div class="det">Flow CSV · PCAP · windows</div>
-    <div class="tag"><i></i>RAW</div>
   </div>
   <div class="pipe-node anim-in d2">
     <div class="stage">02</div>
-    <div class="ico i2">🧬</div>
     <div class="name">Feature</div>
     <div class="det">76-dim rolling window</div>
-    <div class="tag"><i></i>10 RAW + STATS</div>
   </div>
   <div class="pipe-node anim-in d3">
     <div class="stage">03</div>
-    <div class="ico i3">🔮</div>
     <div class="name">Predict</div>
     <div class="det">RandomForest · LSTM</div>
-    <div class="tag"><i></i>RISK SCORE</div>
   </div>
   <div class="pipe-node anim-in d4">
     <div class="stage">04</div>
-    <div class="ico i4">🧭</div>
     <div class="name">Enrich</div>
     <div class="det">MITRE · CAPEC · CVE</div>
-    <div class="tag"><i></i>KILL CHAIN</div>
   </div>
   <div class="pipe-node anim-in d5">
     <div class="stage">05</div>
-    <div class="ico">🛡</div>
     <div class="name">Act</div>
     <div class="det">Playbooks · ledger</div>
-    <div class="tag"><i></i>RESPOND</div>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -631,7 +608,6 @@ st.markdown(
 st.markdown("""
 <div class="feat-grid">
   <div class="glass hover anim-in d1" style="padding:26px 24px">
-    <div class="ficon">🔮</div>
     <h3 style="margin:0 0 10px;font-size:.95rem">Forecast</h3>
     <div style="color:var(--muted);line-height:1.6;font-size:.9rem">Predicts
     per-window <b style="color:var(--text)">risk</b> and which
@@ -640,7 +616,6 @@ st.markdown("""
     <b style="color:var(--text)">6 windows of lead time</b>.</div>
   </div>
   <div class="glass hover anim-in d2" style="padding:26px 24px">
-    <div class="ficon green">🔬</div>
     <h3 style="margin:0 0 10px;font-size:.95rem">Explain</h3>
     <div style="color:var(--muted);line-height:1.6;font-size:.9rem">Every
     prediction carries the model's <i>own</i> attribution —
@@ -648,7 +623,6 @@ st.markdown("""
     so an analyst sees exactly which traffic features drove the alarm.</div>
   </div>
   <div class="glass hover anim-in d3" style="padding:26px 24px">
-    <div class="ficon violet">🛡</div>
     <h3 style="margin:0 0 10px;font-size:.95rem">Respond + audit</h3>
     <div style="color:var(--muted);line-height:1.6;font-size:.9rem">Generate
     MITRE-grounded firewall playbooks, simulate a honeypot redirection, and log
@@ -759,19 +733,19 @@ jp_html += "<div class='jp-sub'>Same-day recall · best case when drift is minim
 jp_html += "</div>"
 
 jp_html += "<div class='jp-rows'>"
-jp_html += ("<div class='jp-row'><div class='jpr-icon'>🔍</div><div class='jpr-text'>"
+jp_html += ("<div class='jp-row'><div class='jpr-text'>"
             "<b>Model-internal attribution</b>"
             "<span>Mean-imputation ablation (RF) and gradient saliency (LSTM) — "
             "not a separate explainer, the model's own reasoning.</span></div></div>")
-jp_html += ("<div class='jp-row'><div class='jpr-icon'>🧠</div><div class='jpr-text'>"
+jp_html += ("<div class='jp-row'><div class='jpr-text'>"
             "<b>Novelty callout, not zero-day detection</b>"
             "<span>Flags activity unlike anything in training via k-NN distance. "
             "Advisory only — analyst reviews, never auto-blocks.</span></div></div>")
-jp_html += ("<div class='jp-row'><div class='jpr-icon'>📜</div><div class='jpr-text'>"
+jp_html += ("<div class='jp-row'><div class='jpr-text'>"
             "<b>Tamper-proof audit trail</b>"
             "<span>Every prediction and action logged to a SHA-256 sealed ledger "
             "with a downloadable SOC incident report (PDF).</span></div></div>")
-jp_html += ("<div class='jp-row'><div class='jpr-icon'>📴</div><div class='jpr-text'>"
+jp_html += ("<div class='jp-row'><div class='jpr-text'>"
             "<b>100% offline — zero network egress</b>"
             "<span>Models committed, no external API calls. "
             "Runs on any machine with Python 3.10+ and scikit-learn.</span></div></div>")
