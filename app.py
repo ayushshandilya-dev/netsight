@@ -135,6 +135,8 @@ html, body, [class*="css"] { font-family: 'Inter', -apple-system, sans-serif; }
 
 /* ---------- layout ---------- */
 .block-container { padding-top: 98px; padding-bottom: 3rem; max-width: 1400px; }
+[data-testid="stAppViewContainer"], .block-container { overflow-x: hidden; }
+body { overflow-x: hidden; }
 
 /* ---------- typography ---------- */
 h1, h2, h3, h4 { font-family:'Inter', sans-serif; color:var(--text); letter-spacing:-.01em; }
