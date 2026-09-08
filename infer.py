@@ -486,6 +486,15 @@ def _run_prefeatured(path, engine, max_windows=0):
     return timeline, summarize(timeline)
 
 
+def score_prefeatured_csv(path, max_windows=0):
+    """Score a pre-featurized window CSV with the default RF engine.
+
+    Thin public wrapper over _run_prefeatured so pages (home, dashboard)
+    can render the same real risk trajectory the command center uses.
+    """
+    return _run_prefeatured(path, RandomForestEngine(), max_windows)
+
+
 def summarize(timeline):
     flagged = [t for t in timeline if t["predicted_alert"]]
     return {
