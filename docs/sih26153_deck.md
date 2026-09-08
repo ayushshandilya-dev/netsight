@@ -136,7 +136,7 @@ CV pooled AUC 0.722 (median fold 0.758) — the Mon→Fri holdout isn't a lucky 
   metrics.csv, model card) — under a **Command** overview (telemetry, network
   map, threat/incident queues, event workflow).
 - Incident intelligence: severity chart, drill-down + attack-narrative Gantt.
-- Verified: Friday-DDoS RF first alert @ win 36 (true peak 0.9768); LSTM first
+- Verified: Friday-DDoS RF first alert @ win 36 (peak risk 1.0 @ w67); LSTM first
   alert @ win 41 with improved cross-day model. All centers AppTest-clean on
   both engines.
 
