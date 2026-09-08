@@ -406,7 +406,7 @@ for activity unlike anything in training".
   (mode, interface, rate, model) so widget tweaks reconfigure rather than
   restart; switching away from the live source stops and releases the session.
 - **Verified**: replay of the full 452-window Friday-DDoS demo yields 92+
-  windows, 11 alerts, peak risk 0.98, and reproduces the offline incidents
+  windows, 358 alerts @ th 0.5, peak risk 1.0 @ w67, and reproduces the offline incidents
   (#1 HIGH botnet w36 · #2 CRITICAL dos w38→394). Sniff mode verified to
   surface the permission error cleanly; live panel renders with 0 exceptions
   under AppTest for both replay and sniff paths.
@@ -461,7 +461,7 @@ for activity unlike anything in training".
 - **Reports & Export Hub**: one-click `snapshot.md`, incident narrative `.md`,
   `metrics.csv`, forensic `ledger.json`, model card.
 - Verified end-to-end (Friday-DDoS): RF first alert @ window **36** (peak
-  0.991, ~80% flag rate); LSTM first alert @ window **41** (peak 1.0, ~59%
+  risk 1.0, ~79% flag rate); LSTM first alert @ window **41** (peak 1.0, ~59%
   flag rate) with the improved cross-day weights. All six tabs + the shared
   Home pass AppTest with 0 exceptions on both RF and LSTM demo paths; server
   returns HTTP 200.
@@ -536,7 +536,7 @@ One command pipeline (`run_all.sh`):
 | Walk-forward pooled AUC (6 folds) | 0.722 | walk_forward_cv.json |
 | World-model next-state AUC | 0.814 | world_model_dynamics.json |
 | Family classifier accuracy | 0.241 (weak prior, never verdict) | full_model_summary.json |
-| Live RF first alert (Friday DDoS) | window 36, peak risk 0.991 | verified end-to-end |
+| Live RF first alert (Friday DDoS) | window 36; peak risk 1.0 @ w67 | verified end-to-end |
 | Live LSTM first alert (Friday DDoS) | window 41, peak risk 1.0 | verified end-to-end |
 
 ---
