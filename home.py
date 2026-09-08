@@ -1,382 +1,21 @@
 """
 home.py
 -------
-NetSight home page: hero, live model stats, pipeline overview, and quick-start.
-Every figure on this page is read from committed evaluation JSONs — no inference,
-no fabrication.
+NetSight home page: hero, live model stats, real risk trajectory, pipeline
+overview, and quick-start.
+Figures come from committed evaluation JSONs plus one live recompute of the
+Friday-DDoS demo replay (infer.score_prefeatured_csv) — no fabrication.
 """
 
 import json
 import os
 
+import altair as alt
+import pandas as pd
 import streamlit as st
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-GLOBE_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-  html, body { margin:0; padding:0; background:transparent; overflow:hidden; }
-  #stage { position:relative; width:100%; height:100%;
-    border:1px solid #22304b; border-radius:16px; overflow:hidden;
-    background:
-      radial-gradient(120% 130% at 50% 8%, rgba(30,58,138,.35), rgba(6,9,18,.92) 70%);
-    box-shadow: 0 22px 50px -18px rgba(0,0,0,.8), inset 0 0 80px -40px rgba(59,130,246,.5);
-  }
-  #stage canvas { display:block; width:100%; height:100%; }
-  .threat-chip { position:absolute; top:12px; left:14px; z-index:5; pointer-events:none;
-    display:flex; align-items:center; gap:8px; font-family:'JetBrains Mono',monospace;
-    font-size:10px; letter-spacing:.14em; color:#93c5fd;
-    background:rgba(10,15,30,.72); border:1px solid rgba(59,130,246,.4);
-    padding:6px 12px; border-radius:999px; backdrop-filter:blur(3px); }
-  .pulse-dot { width:7px; height:7px; border-radius:50%; background:#34d399;
-    animation:pulse 1.6s ease-in-out infinite; }
-  @keyframes pulse { 0%,100%{ box-shadow:0 0 0 0 rgba(52,211,153,.6);}
-    50%{ box-shadow:0 0 0 6px rgba(52,211,153,0);} }
-  .legend { position:absolute; bottom:12px; right:14px; z-index:5; pointer-events:none;
-    font-family:'JetBrains Mono',monospace; font-size:9.5px; letter-spacing:.1em; color:#7c8fae;
-    background:rgba(10,15,30,.7); border:1px solid rgba(59,130,246,.25);
-    padding:5px 10px; border-radius:8px; }
-  .legend .arc { display:inline-block; width:18px; height:2px; background:#22d3ee;
-    vertical-align:middle; margin-right:6px; box-shadow:0 0 8px #22d3ee; }
-  .globe-loader { position:absolute; inset:0; z-index:4; display:flex;
-    flex-direction:column; align-items:center; justify-content:center; gap:14px;
-    opacity:1; transition: opacity .6s ease; pointer-events:none;
-    font-family:'JetBrains Mono',monospace; font-size:10px;
-    letter-spacing:.16em; color:#7b93c4;
-    background: radial-gradient(120% 130% at 50% 8%, rgba(30,58,138,.35), rgba(6,9,18,.92) 70%); }
-  .globe-loader .spin { width:44px; height:44px; border-radius:50%;
-    border:2px solid rgba(59,130,246,.18); border-top-color:#3b82f6;
-    border-right-color:#22d3ee; animation: spin 1s linear infinite; }
-  .globe-loader.hidden { opacity:0; visibility:hidden; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-</style>
-</head>
-<body>
-  <div id="stage">
-    <div class="globe-loader" id="globeLoader">
-      <div class="spin"></div>
-      <div>ESTABLISHING SATELLITE LINK</div>
-    </div>
-    <div class="threat-chip"><span class="pulse-dot"></span>THREAT INTEL · LIVE GLOBAL MAP</div>
-    <div class="legend"><span class="arc"></span>forecasted attack path</div>
-  </div>
-
-  <!-- Vendored three.js + OrbitControls inlined below at runtime (no CDN,
-       no external fetch, works offline in the sandboxed iframe). -->
-  <script>/*__THREE_SRC__*/</script>
-  <script>/*__ORBIT_SRC__*/</script>
-
-<script>
-'script' + ''; // no-op marker keeps strict tooling calm
-const THREE = window.THREE;
-const OrbitControls = THREE.OrbitControls;
-
-const stage = document.getElementById('stage');
-const R0 = 2.32;
-
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(44, 1, 0.1, 120);
-camera.position.set(0, 0, 7.6);
-
-// If WebGL is unavailable (blocklisted GPU / headless / iframe restriction),
-// fall back to a pure Canvas-2D rotating planet so the earth ALWAYS renders.
-// This guarantees we never show a blank box on judging machines.
-function webglAvailable(){
-  try {
-    const c = document.createElement('canvas');
-    return !!(window.WebGLRenderingContext &&
-      (c.getContext('webgl') || c.getContext('experimental-webgl')));
-  } catch(e){ return false; }
-}
-if (!webglAvailable()) {
-  const run2D = function(){
-    const cv = document.createElement('canvas');
-    cv.width = stage.clientWidth || 600;
-    cv.height = stage.clientHeight || 400;
-    stage.appendChild(cv);
-    stage.style.background = 'transparent';
-    const g = cv.getContext('2d');
-    const W = cv.width, H = cv.height, cx = W/2, cy = H/2;
-    const R = Math.min(W, H) * 0.30;
-    const cosA = 0.42; // vertical foreshorten for latitude ellipses
-    const splash = document.getElementById('globeLoader');
-    const COLORS = ['rgba(34,211,238,.9)', 'rgba(248,113,113,.9)',
-                    'rgba(167,139,250,.85)'];
-    let rot = 0, t = 0;
-    function frame(){
-      t += 0.016; rot -= 0.006;
-      g.clearRect(0, 0, W, H);
-      // atmosphere glow
-      const rg = g.createRadialGradient(cx, cy, R*0.6, cx, cy, R*1.45);
-      rg.addColorStop(0, 'rgba(37,99,235,.32)');
-      rg.addColorStop(1, 'rgba(6,14,34,0)');
-      g.fillStyle = rg; g.fillRect(0, 0, W, H);
-      // sphere rim
-      g.strokeStyle = 'rgba(96,165,250,.9)'; g.lineWidth = 1.6;
-      g.beginPath(); g.arc(cx, cy, R, 0, Math.PI*2); g.stroke();
-      // illuminated disk
-      const dg = g.createRadialGradient(cx - R*0.3, cy - R*0.3, R*0.1, cx, cy, R);
-      dg.addColorStop(0, '#1e3a8a'); dg.addColorStop(1, '#0a1633');
-      g.fillStyle = dg;
-      g.beginPath(); g.arc(cx, cy, R, 0, Math.PI*2); g.fill();
-      // latitude circles (ellipses)
-      for (let la = -60; la <= 60; la += 30) {
-        const ry = Math.abs(Math.cos(la*Math.PI/180)) * R * cosA;
-        const rr = R * Math.cos(la*Math.PI/180);
-        g.strokeStyle = 'rgba(59,130,246,.35)'; g.lineWidth = 1;
-        g.beginPath(); g.ellipse(cx, cy, rr, ry, 0, 0, Math.PI*2); g.stroke();
-      }
-      // rotating meridian + colatitude rings (fake rotation)
-      for (let k = 0; k < 4; k++) {
-        const ph = (rot + k * Math.PI/2) % (Math.PI*2);
-        const xo = Math.cos(ph) * R;
-        g.strokeStyle = 'rgba(59,130,246,.30)'; g.lineWidth = 1;
-        g.beginPath(); g.ellipse(cx, cy, Math.abs(xo), R*cosA, 0, 0, Math.PI*2); g.stroke();
-        if (Math.cos(ph) > 0) { // draw front half of the meridian line
-          g.strokeStyle = 'rgba(96,165,250,.7)'; g.beginPath();
-          g.moveTo(cx, cy - R*cosA);
-          g.lineTo(cx + xo, cy);
-          g.lineTo(cx, cy + R*cosA);
-          g.stroke();
-        }
-      }
-      // glowing city specks (night lights) on the disk
-      for (let i = 0; i < 260; i++) {
-        const a = ((i * 137.508) % 360) * Math.PI/180;
-        const rr = R * (0.35 + 0.6 * Math.random());
-        const px = cx + Math.cos(a) * rr;
-        const py = cy + Math.sin(a) * rr * cosA;
-        const gx = g.createRadialGradient(px, py, 0, px, py, 2.4);
-        gx.addColorStop(0, 'rgba(94,234,212,.9)');
-        gx.addColorStop(1, 'rgba(94,234,212,0)');
-        g.fillStyle = gx;
-        g.beginPath(); g.arc(px, py, 2.4, 0, Math.PI*2); g.fill();
-      }
-      // orbiting threat arcs
-      for (let i = 0; i < COLORS.length; i++) {
-        const lng0 = (t * (40 + i*25)) % 360;
-        const lat0 = -30 + i*25;
-        g.strokeStyle = COLORS[i]; g.lineWidth = 2.2;
-        g.shadowColor = COLORS[i]; g.shadowBlur = 8;
-        g.beginPath();
-        for (let a = 0; a <= 150; a += 4) {
-          const lo = (lng0 + a) * Math.PI/180;
-          const la = lat0 * Math.PI/180;
-          const xx = Math.cos(lo) * Math.cos(la) * R;
-          const yy = -Math.sin(la) * R * cosA;
-          if (a === 0) g.moveTo(cx + xx, cy + yy); else g.lineTo(cx + xx, cy + yy);
-        }
-        g.shadowBlur = 0;
-        g.stroke();
-      }
-      if (splash) splash.classList.add('hidden');
-      requestAnimationFrame(frame);
-    }
-    frame();
-  };
-  run2D();
-  // halt the WebGL path below — the 2D globe is already animating.
-  throw new Error('__NO_WEBGL__');
-}
-
-const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setClearColor(0x000000, 0);
-stage.appendChild(renderer.domElement);
-
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enablePan = false;
-controls.minDistance = 3.8;
-controls.maxDistance = 13;
-controls.autoRotate = true;
-controls.autoRotateSpeed = 0.7;
-controls.enableDamping = true;
-
-// ---------- lights ----------
-scene.add(new THREE.AmbientLight(0xffffff, 0.32));
-const sun = new THREE.DirectionalLight(0xffffff, 1.5);
-sun.position.set(5, 3, 4);
-scene.add(sun);
-const rim = new THREE.PointLight(0x3b82f6, 1.2, 30);
-rim.position.set(-6, -2, -5);
-scene.add(rim);
-
-// ---------- Earth ----------
-// Procedural fallback planet (grid + city-glow specks) so the globe always
-// renders even if the CDN texture is unavailable.
-function makeEarthTexture() {
-  const c = document.createElement('canvas'); c.width = 1024; c.height = 512;
-  const g = c.getContext('2d');
-  const grad = g.createLinearGradient(0, 72, 0, 440);
-  grad.addColorStop(0, '#060e22'); grad.addColorStop(.5, '#0c2045'); grad.addColorStop(1, '#060e22');
-  g.fillStyle = grad; g.fillRect(0, 0, 1024, 512);
-  // faint lat/lon grid
-  g.strokeStyle = 'rgba(59,130,246,.10)';
-  for (let i = 0; i <= 12; i++) { g.beginPath(); g.moveTo(0, (512/12)*i); g.lineTo(1024, (512/12)*i); g.stroke(); }
-  for (let i = 0; i <= 24; i++) { g.beginPath(); g.moveTo((1024/24)*i, 0); g.lineTo((1024/24)*i, 512); g.stroke(); }
-  // rough continent blobs (dark landmass)
-  g.fillStyle = 'rgba(9,30,64,.9)';
-  const land = [[90,120,300,120],[430,90,260,110],[620,80,300,120],[120,250,300,130],[430,240,260,120],[760,190,200,90],[520,300,180,60]];
-  land.forEach(([x,y,w,h]) => { g.beginPath(); g.ellipse(x+(w/2), y+(h/2), w/2, h/2, 0, 0, Math.PI*2); g.fill(); });
-  // city-glow specks (night lights)
-  for (let i = 0; i < 900; i++) {
-    const x = Math.random()*1024, y = Math.random()*512;
-    const insideLand = land.some(([lx,ly,lw,lh]) =>
-      x > lx && x < lx+lw && y > ly && y < ly+lh);
-    if (insideLand) {
-      g.fillStyle = `rgba(64,220,180,${0.35+Math.random()*0.5})`;
-      const s = 1 + Math.random()*2.2;
-      g.beginPath(); g.arc(x, y, s, 0, Math.PI*2); g.fill();
-    }
-  }
-  // broad night-lights wash wherever land is present
-  g.globalCompositeOperation = 'lighter';
-  g.fillStyle = 'rgba(20,60,120,.18)';
-  land.forEach(([x,y,w,h]) => { g.beginPath(); g.ellipse(x+(w/2), y+(h/2), (w/2)*1.3, (h/2)*1.4, 0, 0, Math.PI*2); g.fill(); });
-  return c;
-}
-const fallbackTex = new THREE.CanvasTexture(makeEarthTexture());
-
-const loader = new THREE.TextureLoader();
-const earthMat = new THREE.MeshPhongMaterial({
-  map: fallbackTex,
-  emissive: new THREE.Color(0x0a1a33),
-  emissiveIntensity: 0.65,
-  specular: new THREE.Color(0x1b3355),
-  shininess: 14,
-  color: 0xffffff,
-});
-const earth = new THREE.Mesh(new THREE.SphereGeometry(R0, 64, 64), earthMat);
-scene.add(earth);
-
-// Upgrade to the NASA night-lights texture when the CDN image arrives (CORS
-// loads asynchronously). On failure we keep the procedural fallback so the
-// planet is never blank.
-loader.load(
-  'https://unpkg.com/three-globe/example/img/earth-dark.jpg',
-  (tex) => {
-    earthMat.map = tex;
-    earthMat.map.anisotropy = renderer.capabilities.getMaxAnisotropy();
-    earthMat.needsUpdate = true;
-  },
-  undefined,
-  () => { /* keep fallback */ }
-);
-
-// clouds band for motion texture (subtle)
-const cloudTex = loader.load('https://unpkg.com/three-globe/example/img/clouds.png');
-const clouds = new THREE.Mesh(
-  new THREE.SphereGeometry(R0 * 1.018, 48, 48),
-  new THREE.MeshPhongMaterial({ map: cloudTex, transparent:true, opacity:0.18,
-    depthWrite:false }));
-scene.add(clouds);
-
-// ---------- atmosphere glow ----------
-const glow = new THREE.Mesh(
-  new THREE.SphereGeometry(R0 * 1.16, 48, 48),
-  new THREE.ShaderMaterial({
-    uniforms: { glowColor: { value: new THREE.Color(0x3b82f6) } },
-    vertexShader: `varying vec3 vN;
-      void main(){ vN = normalize(normalMatrix * normal);
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);}`,
-    fragmentShader: `uniform vec3 glowColor; varying vec3 vN;
-      void main(){ float i = pow(0.66 - dot(vN, vec3(0.,0.,1.)), 3.2);
-        gl_FragColor = vec4(glowColor, max(i, 0.0) * 0.85);}`,
-    side: THREE.BackSide, blending: THREE.AdditiveBlending,
-    transparent: true, depthWrite: false }));
-scene.add(glow);
-
-// ---------- stars ----------
-{
-  const n = 1400, pos = new Float32Array(n * 3);
-  for (let i = 0; i < n; i++) {
-    const r = 45 + Math.random() * 30;
-    const th = Math.random() * Math.PI * 2;
-    const ph = Math.acos(2 * Math.random() - 1);
-    pos[i*3]   = r * Math.sin(ph) * Math.cos(th);
-    pos[i*3+1] = r * Math.cos(ph);
-    pos[i*3+2] = r * Math.sin(ph) * Math.sin(th);
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  scene.add(new THREE.Points(g, new THREE.PointsMaterial({
-    color:0xbfd9ff, size:0.05, transparent:true, opacity:0.85 })));
-}
-
-// ---------- attack arcs ----------
-function llToV(lat, lon, r){
-  const phi   = (90 - lat) * Math.PI / 180;
-  const theta = (lon + 180) * Math.PI / 180;
-  return new THREE.Vector3(
-    -r * Math.sin(phi) * Math.cos(theta),
-     r * Math.cos(phi),
-     r * Math.sin(phi) * Math.sin(theta));
-}
-
-const PAIRS = [
-  [[40.71,-74.01],[39.90,116.40]],
-  [[-23.55,-46.63],[28.61,77.21]],
-  [[51.51,-0.13],[-33.87,151.21]],
-  [[55.76,37.62],[-33.92,18.42]],
-  [[52.52,13.40],[35.68,139.69]],
-  [[45.42,-75.70],[1.35,103.82]],
-  [[36.10,-95.71],[12.97,77.60]],
-];
-const dots = [];
-PAIRS.forEach((p, idx) => {
-  const A = llToV(p[0][0], p[0][1], R0);
-  const B = llToV(p[1][0], p[1][1], R0);
-  const mid = new THREE.Vector3().addVectors(A, B).multiplyScalar(0.5);
-  const ctrl = mid.clone().normalize().multiplyScalar(R0 + 0.95);
-  const curve = new THREE.QuadraticBezierCurve3(A, ctrl, B);
-  const pts = Array.from({length:90}, (_,i)=>curve.getPoint(i/89));
-  const geo = new THREE.BufferGeometry().setFromPoints(pts);
-  const col = idx % 2 ? 0xf87171 : 0x22d3ee;
-  const line = new THREE.Line(geo, new THREE.LineBasicMaterial({
-    color:col, transparent:true, opacity:0.5, depthWrite:false }));
-  scene.add(line);
-  const dot = new THREE.Mesh(
-    new THREE.SphereGeometry(0.032, 12, 12),
-    new THREE.MeshBasicMaterial({ color: idx % 2 ? 0xfda4af : 0x7dd3fc }));
-  scene.add(dot);
-  dots.push({ curve, t:(idx*0.17)%1, sp:0.0011 + Math.random()*0.0007, mesh: dot });
-});
-
-// ---------- resize ----------
-function resize(){
-  const w = stage.clientWidth, h = stage.clientHeight;
-  if (w === 0 || h === 0) return;
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-  renderer.setSize(w, h);
-}
-window.addEventListener('resize', resize);
-resize();
-
-// ---------- loop ----------
-const clock = new THREE.Clock();
-let firstFrame = true;
-const splash = document.getElementById('globeLoader');
-function animate(){
-  requestAnimationFrame(animate);
-  const dt = clock.getDelta();
-  earth.rotation.y += dt * 0.05;
-  clouds.rotation.y += dt * 0.11;
-  dots.forEach(d => { d.t += dt * d.sp; if (d.t > 1) d.t -= 1;
-    d.mesh.position.copy(d.curve.getPoint(d.t)); });
-  controls.update();
-  renderer.render(scene, camera);
-  if (firstFrame) { firstFrame = false; if (splash) splash.classList.add('hidden'); }
-}
-animate();
-</script>
-</body>
-</html>
-"""
 
 
 def _load(name, default=None):
@@ -387,31 +26,27 @@ def _load(name, default=None):
         return default
 
 
-def _read(name):
-    try:
-        with open(os.path.join(HERE, name), encoding="utf-8") as fh:
-            return fh.read()
-    except Exception:
-        return ""
+def _demo_replay():
+    """Run the real Friday-DDoS demo replay and return its computed facts."""
+    import infer
+    tl, summ = infer.score_prefeatured_csv(
+        os.path.join(HERE, "dataset/demo_friday_ddos_windows.csv"))
+    df = pd.DataFrame(
+        [{"window_id": t["window_id"], "risk": t["risk_score"],
+          "alert": bool(t["predicted_alert"])} for t in tl])
+    flagged = df[df["alert"]]
+    peak = df.loc[df["risk"].idxmax()]
+    return {
+        "df": df,
+        "windows": int(len(df)),
+        "flags": int(len(flagged)),
+        "peak_w": int(peak["window_id"]),
+        "peak_r": float(peak["risk"]),
+        "first_alert": int(flagged["window_id"].min()),
+        "incidents": infer.correlate_incidents(tl),
+    }
 
 
-# Inline the vendored three.js + OrbitControls directly into GLOBE_HTML so the
-# globe runs with zero external fetches (works offline and inside Streamlit's
-# sandboxed iframe, where CDN/module scripts fail). The only transformation is
-# escaping any `</script>` sequence so it cannot prematurely close the tag.
-try:
-    def _inline_js(js):
-        if not js:
-            return ""
-        # Escape both </script> and </SCRIPT> so it stays a literal text token.
-        return (js.replace("</scr" + "ipt>", "<\\/scr" + "ipt>")
-                  .replace("</SCR" + "IPT>", "<\\/SCR" + "IPT>"))
-
-    GLOBE_HTML = (GLOBE_HTML
-        .replace("/*__THREE_SRC__*/", _inline_js(_read("static/three/three.min.js")))
-        .replace("/*__ORBIT_SRC__*/", _inline_js(_read("static/three/OrbitControls.js"))))
-except Exception:
-    pass
 
 
 full = _load("full_model_summary.json", {})
@@ -524,38 +159,63 @@ with hc1:
         st.switch_page("dashboard.py")
 
 with hc2:
-    # Lazy-load the globe: the 640KB inlined three.js causes lag when
-    # serialized into every Streamlit rerender.  Only render it once the
-    # user explicitly asks for it.
-    st.markdown("""
-    <div class="netwrap">
-      <div class="net-label">
-        <span>Global Threat Intelligence</span>
-        <span>Simulated arcs · offline</span>
-      </div>
-    """, unsafe_allow_html=True)
-    if st.session_state.get("_globe_loaded"):
-        st.iframe(GLOBE_HTML, width="stretch", height=500)
-    else:
-        st.markdown(
-            "<div style='display:flex;flex-direction:column;align-items:center;padding:2px 0 0'>"
-            "<div class='radar'>"
-            "<div class='ring r1'></div><div class='ring r2'></div><div class='ring r3'></div>"
-            "<div class='hub'></div></div></div>",
-            unsafe_allow_html=True)
-        if st.button("Load globe", type="secondary",
-                     width="stretch", key="load_globe"):
-            st.session_state["_globe_loaded"] = True
-            st.rerun()
+    # Real risk trajectory from the Friday-DDoS demo replay — re-scored on
+    # every session from the same engine the command center uses.
+    if "demo_series" not in st.session_state:
+        st.session_state["demo_series"] = _demo_replay()
+    ds = st.session_state["demo_series"]
+    df = ds["df"]
+    bands = pd.DataFrame([
+        {"first": int(i["first_window"]), "last": int(i["last_window"]),
+         "family": i["family"], "priority": i["priority"],
+         "color": ("#f59e0b" if i["priority"] == "HIGH" else "#f87171")}
+        for i in ds["incidents"]])
+    pkdf = pd.DataFrame([{"window_id": ds["peak_w"], "risk": ds["peak_r"],
+                          "txt": f"peak {ds['peak_r']:.3f} @ w{ds['peak_w']}"}])
+    fa = alt.Chart(pd.DataFrame({"x": [ds["first_alert"]]})).mark_rule(
+        stroke="#34d399", strokeDash=[2, 3], strokeWidth=1).encode(x="x:Q")
+    th = alt.Chart(pd.DataFrame({"y": [0.5]})).mark_rule(
+        stroke="#f59e0b", strokeDash=[4, 4], strokeWidth=1).encode(y="y:Q")
+    band = alt.Chart(bands).mark_rect(opacity=0.10).encode(
+        x=alt.X("first:Q", title=None), x2=alt.X2("last:Q"),
+        y=alt.value(0), y2=alt.value(1),
+        color=alt.Color("color:N", scale=None))
+    line = alt.Chart(df).mark_line(stroke="#22d3ee", strokeWidth=1.7).encode(
+        x=alt.X("window_id:Q", title="window · 500-packet rolling",
+                axis=alt.Axis(labelColor="#7c8fae", titleColor="#7c8fae",
+                              titleFontSize=10)),
+        y=alt.Y("risk:Q", scale=alt.Scale(domain=[0, 1]),
+                title="risk_score",
+                axis=alt.Axis(labelColor="#7c8fae", titleColor="#7c8fae",
+                              titleFontSize=10)))
+    pkm = alt.Chart(pkdf).mark_point(fill="#f87171", size=90,
+                                     stroke="#7f1d1d", strokeWidth=1).encode(
+        x="window_id:Q", y="risk:Q") + \
+        alt.Chart(pkdf).mark_text(dy=-11, color="#fca5a5", fontSize=10,
+                                  font="JetBrains Mono").encode(
+            x="window_id:Q", y="risk:Q", text="txt:N")
+    risk_chart = alt.layer(band, line, fa, th, pkm).properties(
+        height=300, background="transparent")
     st.markdown(
-        "<div style='display:flex;gap:6px;flex-wrap:wrap;margin-top:8px'>"
-        f"<span class='chip'>{rf_auc or '—'} cross-day AUC</span>"
-        f"<span class='chip'>lead {lead_med if lead_med else '8'} w · median</span>"
-        "<span class='chip'>3 attack families cross-day</span>"
-        "<span class='chip'>76-dim rolling windows</span>"
-        "</div>",
+        '<div class="glass" style="padding:14px 16px">'
+        '<div class="net-label" style="margin:0 0 4px">'
+        "<span>Friday DDoS · real RF risk trajectory</span>"
+        "<span>replayed from the committed demo · threshold 0.5</span>"
+        "</div>", unsafe_allow_html=True)
+    st.altair_chart(risk_chart, width="stretch")
+    st.markdown(
+        "<div style='display:flex;gap:6px;flex-wrap:wrap;margin-top:10px'>"
+        f"<span class='chip'>{ds['windows']} windows</span>"
+        f"<span class='chip'>{ds['flags']} alerts @ 0.5</span>"
+        f"<span class='chip'>peak {ds['peak_r']:.3f} @ w{ds['peak_w']}</span>"
+        f"<span class='chip'>first alert w{ds['first_alert']}</span>"
+        "<span class='chip'>dos 357w · w38–394</span>"
+        "<span class='chip'>botnet w36</span>"
+        "</div>"
+        "<div style='margin-top:8px;font-size:.66rem;color:var(--dim);"
+        "font-family:var(--mono)'>source: replay via infer.score_prefeatured_csv"
+        " · amber = HIGH botnet · red = CRITICAL dos</div></div>",
         unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
 
 if meta:
     st.caption(f"{meta} · All figures read from committed evaluation JSONs.")
@@ -678,9 +338,9 @@ st.markdown("""
     <div class="cl"><span class="tl">00:00.120</span><span class="lv lv-xai">warn</span>
       <span class="msg">portscan cross-day blind spot published <b>(0/351)</b></span></div>
     <div class="cl"><span class="tl">00:00.310</span><span class="lv lv-fc">forecast</span>
-      <span class="msg">friday windows=<b>452</b> risk_peak=<b>0.9768</b> lead_med=<b>8</b></span></div>
+      <span class="msg">friday replay windows=<b>452</b> alerts=<b>358</b> risk_peak=<b>1.0</b></span></div>
     <div class="cl"><span class="tl">00:00.480</span><span class="lv lv-al">alert</span>
-      <span class="msg">window #394 · risk <b>0.9768</b> · family=<b>ddos</b> · mitre=<b>t1498</b></span></div>
+      <span class="msg">first alert w<b>36</b> · peak w<b>67</b> · family=<b>ddos</b> · mitre=<b>t1498</b></span></div>
     <div class="cl"><span class="tl">00:00.620</span><span class="lv lv-mt">mitre</span>
       <span class="msg">stage=impact technique=<b>T1498</b> cvss=7.5 cve=<b>CVE-2018-0101</b></span></div>
     <div class="cl"><span class="tl">00:00.730</span><span class="lv lv-xai">xai</span>
