@@ -433,7 +433,7 @@ alerts + peak-risk metric cards, snapshot (pps/uptime/window-in-progress),
 correlation**, and a live alert log. "⛔ Stop live capture" stops the session.
 
 ### Verified
-- Full 452-window Friday-DDoS replay → 92+ windows, 11 alerts, peak risk 0.98;
+- Full 452-window Friday-DDoS replay → 358 alerts @ threshold 0.5 (79%), peak risk 1.0 @ w67;
   reproduces the offline incidents (#1 HIGH botnet w36 · #2 CRITICAL dos
   w38→394).
 - Sniff mode surfaces the permission error cleanly.
@@ -510,7 +510,7 @@ packaged for judges.
 | Walk-forward pooled AUC | 0.722 | walk_forward_cv.json |
 | World-model next-state AUC | 0.814 | world_model_dynamics.json |
 | Family classifier accuracy | 0.241 | full_model_summary.json |
-| Live RF first alert (DDoS) | window 36, peak 0.991 | verified |
+| Live RF first alert (DDoS) | window 36; peak risk 1.0 @ w67 | verified |
 | Live LSTM first alert (DDoS) | window 41, peak 1.0 | verified |
 | Windows in full_features.csv | 5651 | full_features.csv |
 | Features per window | 76 | full_pipeline.py |
