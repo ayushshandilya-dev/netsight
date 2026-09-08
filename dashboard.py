@@ -98,10 +98,19 @@ def _cls_col(cls):
     }.get(str(cls), "#3b82f6")
 
 
-def netgraph_html(tl, flagged):
-    """Inline SVG network-activity map built from the real flagged windows."""
+def netgraph_html(tl, flagged, risk_now=0.0):
+    """Inline SVG network-activity map built from the real flagged windows.
+
+    risk_now = current (latest) window's risk_score; the core ring scales and
+    tints with it so the map reacts to the live stream, not just aggregate
+    family counts.
+    """
     fams = flagged["attack_family"].value_counts().head(6) if len(flagged) else None
     cx, cy, R = 360, 104, 132
+    try:
+        risk_now = max(0.0, min(1.0, float(risk_now)))
+    except (TypeError, ValueError):
+        risk_now = 0.0
     parts = []
     if fams is None or not len(fams):
         parts.append(
@@ -126,12 +135,20 @@ def netgraph_html(tl, flagged):
                 f'<line class="netedge" x1="{x:.0f}" y1="{y:.0f}" '
                 f'x2="{cx}" y2="{cy}" stroke="{col}" stroke-width="{w:.1f}" '
                 f'opacity="{op:.2f}"/>')
+        core_r = 26 + round(20 * risk_now)
+        core_col = ("#34d399" if risk_now < 0.5
+                    else ("#f59e0b" if risk_now < 0.75 else "#f87171"))
+        core_fill = {"#34d399": "rgba(52,211,153,.10)",
+                     "#f59e0b": "rgba(245,158,11,.12)",
+                     "#f87171": "rgba(248,113,113,.14)"}[core_col]
         parts.append(
-            f'<circle class="netcore" cx="{cx}" cy="{cy}" r="26" '
-            f'fill="rgba(34,211,238,.10)" stroke="#22d3ee" stroke-width="1.6"/>')
+            f'<circle class="netcore" cx="{cx}" cy="{cy}" r="{core_r}" '
+            f'fill="{core_fill}" stroke="{core_col}" stroke-width="1.6"/>')
+        core_label = ("CORE · CLEAR" if risk_now < 0.5
+                      else f"CORE · {risk_now:.3f}")
         parts.append(
-            f'<text x="{cx}" y="{cy+4}" text-anchor="middle" fill="#67e8f9" '
-            f'font-size="11" font-weight="700">CORE</text>')
+            f'<text x="{cx}" y="{cy+4}" text-anchor="middle" fill="{core_col}" '
+            f'font-size="11" font-weight="700">{core_label}</text>')
         for f, x, y, r, c, col in nodes:
             parts.append(
                 f'<circle class="netnode" cx="{x:.0f}" cy="{y:.0f}" r="{r:.1f}" '
@@ -589,9 +606,10 @@ cc1, cc2 = st.columns([1.6, 1])
 with cc1:
     st.markdown(
         '<div class="netwrap"><div class="net-label">'
-        '<span>Network activity map</span>'
-        '<span>nodes = active families · edges weighted by flags</span></div>'
-        + netgraph_html(tl, flagged) + "</div>",
+        '<span>Network activity map — live reaction</span>'
+        f'<span>core = current risk {float(tl.iloc[-1]["risk_score"]):.3f} · '
+        'nodes = active families</span></div>'
+        + netgraph_html(tl, flagged, risk_now=tl.iloc[-1]["risk_score"]) + "</div>",
         unsafe_allow_html=True)
 with cc2:
     threat_html = ("<div class='queue'><div class='qhead'><b>Threat queue</b>"
